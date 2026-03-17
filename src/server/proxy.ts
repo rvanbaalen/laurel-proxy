@@ -24,7 +24,7 @@ export class ProxyServer {
 
   async start(): Promise<number> {
     this.server = http.createServer((req, res) => this.handleRequest(req, res));
-    this.server.on('connect', (req, clientSocket, head) => this.handleConnect(req, clientSocket, head));
+    this.server.on('connect', (req, clientSocket: net.Socket, head) => this.handleConnect(req, clientSocket, head));
 
     this.writeTimer = setInterval(() => this.flushWrites(), 100);
 
@@ -94,7 +94,7 @@ export class ProxyServer {
         method: clientReq.method,
         headers: { ...clientReq.headers },
       };
-      delete options.headers!['proxy-connection'];
+      delete (options.headers as Record<string, string>)['proxy-connection'];
 
       const proxyReq = http.request(options, (proxyRes) => {
         const responseBodyChunks: Buffer[] = [];

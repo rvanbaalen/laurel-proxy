@@ -35,7 +35,7 @@ export function createApiRouter(
   });
 
   router.get('/requests/:id', (req: Request, res: Response) => {
-    const record = db.getById(req.params.id);
+    const record = db.getById(req.params.id as string);
     if (!record) {
       res.status(404).json({ error: 'Not found' });
       return;
