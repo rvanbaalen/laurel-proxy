@@ -65,29 +65,41 @@ export class RoxyProxyServer {
       res.sendFile(path.join(uiDistPath, 'index.html'));
     });
 
-    const uiPort = await new Promise<number>((resolve, reject) => {
-      this.apiServer = app.listen(this.config.uiPort, () => {
-        const addr = this.apiServer!.address() as net.AddressInfo | null;
-        if (!addr) {
-          reject(new Error(`UI server failed to bind to port ${this.config.uiPort}`));
-          return;
-        }
-        resolve(addr.port);
-      });
-      this.apiServer!.on('error', (err: NodeJS.ErrnoException) => {
-        if (err.code === 'EADDRINUSE') {
-          reject(new Error(`Port ${this.config.uiPort} is already in use. Is another instance running?`));
-        } else {
-          reject(err);
-        }
-      });
-      this.apiServer!.on('connection', (socket) => {
-        this.connections.add(socket);
-        socket.on('close', () => this.connections.delete(socket));
-      });
+    this.apiServer = http.createServer(app);
+    this.apiServer.on('connection', (socket) => {
+      this.connections.add(socket);
+      socket.on('close', () => this.connections.delete(socket));
     });
 
+    const uiPort = await this.listenWithRetry(this.apiServer, this.config.uiPort);
+
     return { proxyPort: this.actualProxyPort, uiPort };
+  }
+
+  private listenWithRetry(server: http.Server, port: number, maxRetries = 10): Promise<number> {
+    return new Promise((resolve, reject) => {
+      let attempt = 0;
+      const tryPort = (p: number) => {
+        const onError = (err: NodeJS.ErrnoException) => {
+          if (err.code === 'EADDRINUSE' && attempt < maxRetries) {
+            attempt++;
+            server.removeListener('error', onError);
+            tryPort(p + 1);
+          } else if (err.code === 'EADDRINUSE') {
+            reject(new Error(`Ports ${port}-${p} are all in use`));
+          } else {
+            reject(err);
+          }
+        };
+        server.once('error', onError);
+        server.listen(p, () => {
+          server.removeListener('error', onError);
+          const addr = server.address() as net.AddressInfo;
+          resolve(addr.port);
+        });
+      };
+      tryPort(port);
+    });
   }
 
   get isProxyRunning(): boolean {
