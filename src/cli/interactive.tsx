@@ -8,7 +8,8 @@ import fs from 'node:fs';
 import { loadConfig } from '../server/config.js';
 import { RoxyProxyServer } from '../server/index.js';
 import { Database } from '../storage/db.js';
-import { enableSystemProxy, disableSystemProxy, installCaCert } from './system-proxy.js';
+import { enableSystemProxy, disableSystemProxy, installCaCert, checkCaStatus } from './system-proxy.js';
+import type { CaStatus } from './system-proxy.js';
 import type { RequestRecord } from '../shared/types.js';
 
 // ── API helpers ──
@@ -46,6 +47,8 @@ interface MenuItem {
   label: string;
   value: string;
   hint?: string;
+  badge?: string;
+  badgeColor?: string;
 }
 
 interface MenuHeading {
@@ -55,40 +58,48 @@ interface MenuHeading {
 
 type MenuEntry = MenuItem | MenuHeading;
 
-const MENU: MenuEntry[] = [
-  { type: 'heading', label: 'Proxy' },
-  { type: 'item', label: 'Start proxy', value: 'start', hint: 'Launch the intercepting proxy' },
-  { type: 'item', label: 'Stop proxy', value: 'stop', hint: 'Shut down the proxy server' },
-  { type: 'item', label: 'Status', value: 'status', hint: 'View proxy status and stats' },
+function buildMenu(proxyRunning: boolean, caStatus: CaStatus): MenuEntry[] {
+  const caBadge = !caStatus.exists
+    ? { badge: 'not generated', badgeColor: 'gray' }
+    : caStatus.trusted
+      ? { badge: 'trusted', badgeColor: 'green' }
+      : { badge: 'not trusted', badgeColor: 'yellow' };
 
-  { type: 'heading', label: 'Traffic' },
-  { type: 'item', label: 'View requests', value: 'requests', hint: 'Browse captured traffic' },
-  { type: 'item', label: 'Clear traffic', value: 'clear', hint: 'Delete all captured requests' },
-  { type: 'item', label: 'Open web UI', value: 'open-ui', hint: 'Open dashboard in browser' },
+  return [
+    { type: 'heading', label: 'Proxy' },
+    proxyRunning
+      ? { type: 'item', label: 'Stop proxy', value: 'toggle-proxy', hint: 'Shut down the proxy server', badge: 'running', badgeColor: 'green' }
+      : { type: 'item', label: 'Start proxy', value: 'toggle-proxy', hint: 'Launch the intercepting proxy', badge: 'stopped', badgeColor: 'red' },
+    { type: 'item', label: 'Status', value: 'status', hint: 'View proxy status and stats' },
 
-  { type: 'heading', label: 'Setup' },
-  { type: 'item', label: 'Trust CA certificate', value: 'trust-ca', hint: 'Install cert for HTTPS interception' },
-  { type: 'item', label: 'Set system proxy', value: 'proxy-on', hint: 'Route all traffic through RoxyProxy' },
-  { type: 'item', label: 'Remove system proxy', value: 'proxy-off', hint: 'Restore direct connections' },
+    { type: 'heading', label: 'Traffic' },
+    { type: 'item', label: 'View requests', value: 'requests', hint: 'Browse captured traffic' },
+    { type: 'item', label: 'Clear traffic', value: 'clear', hint: 'Delete all captured requests' },
+    { type: 'item', label: 'Open web UI', value: 'open-ui', hint: 'Open dashboard in browser' },
 
-  { type: 'heading', label: '' },
-  { type: 'item', label: 'Quit', value: 'quit' },
-];
+    { type: 'heading', label: 'Setup' },
+    { type: 'item', label: 'Trust CA certificate', value: 'trust-ca', hint: 'Install cert for HTTPS interception', ...caBadge },
+    { type: 'item', label: 'Set system proxy', value: 'proxy-on', hint: 'Route all traffic through RoxyProxy' },
+    { type: 'item', label: 'Remove system proxy', value: 'proxy-off', hint: 'Restore direct connections' },
 
-const selectableItems = MENU.filter((e): e is MenuItem => e.type === 'item');
+    { type: 'heading', label: '' },
+    { type: 'item', label: 'Quit', value: 'quit' },
+  ];
+}
 
-function GroupedMenu({ cursor, onSelect }: { cursor: number; onSelect: (value: string) => void }) {
+function GroupedMenu({ menu, cursor, onSelect }: { menu: MenuEntry[]; cursor: number; onSelect: (value: string) => void }) {
   let itemIndex = 0;
 
   useInput((_input, key) => {
     if (key.return) {
-      onSelect(selectableItems[cursor].value);
+      const items = menu.filter((e): e is MenuItem => e.type === 'item');
+      onSelect(items[cursor].value);
     }
   });
 
   return (
     <Box flexDirection="column">
-      {MENU.map((entry, i) => {
+      {menu.map((entry, i) => {
         if (entry.type === 'heading') {
           if (!entry.label) return <Text key={i}> </Text>;
           return (
@@ -103,9 +114,11 @@ function GroupedMenu({ cursor, onSelect }: { cursor: number; onSelect: (value: s
 
         return (
           <Box key={entry.value}>
-            <Text color="cyan">{selected ? ' ▸ ' : '   '}</Text>
+            <Text color="cyan">{selected ? ' > ' : '   '}</Text>
             <Text bold={selected}>{entry.label}</Text>
-            {entry.hint && !selected ? <Text> </Text> : null}
+            {entry.badge && (
+              <Text color={entry.badgeColor as any}> [{entry.badge}]</Text>
+            )}
             {entry.hint && selected ? <Text dimColor>  {entry.hint}</Text> : null}
           </Box>
         );
@@ -134,7 +147,7 @@ function Header({ running }: { running: boolean }) {
 
 // ── Sub-screens ──
 
-type Screen = 'menu' | 'status' | 'requests' | 'request-detail' | 'starting' | 'stopping';
+type Screen = 'menu' | 'status' | 'requests' | 'request-detail' | 'working';
 
 function StatusView({ onBack }: { onBack: () => void }) {
   const [status, setStatus] = useState<Record<string, unknown> | null>(null);
@@ -222,7 +235,7 @@ function RequestsView({ onBack, onSelect }: { onBack: () => void; onSelect: (id:
       <Text dimColor>{'  ' + '─'.repeat(70)}</Text>
       {requests.map((r, i) => (
         <Box key={r.id}>
-          <Text color="cyan">{i === cursor ? '▸ ' : '  '}</Text>
+          <Text color="cyan">{i === cursor ? '> ' : '  '}</Text>
           <Text color={methodColor(r.method)}>{r.method.padEnd(8)}</Text>
           <Text color={statusColor(r.status)}>{String(r.status ?? '-').padEnd(8)}</Text>
           <Text>{r.host.slice(0, 24).padEnd(25)}</Text>
@@ -306,13 +319,23 @@ function formatBodyStr(body: Buffer | null, contentType: string | null): string 
 function App() {
   const { exit } = useApp();
   const [screen, setScreen] = useState<Screen>('menu');
+  const [workingLabel, setWorkingLabel] = useState('');
   const [message, setMessage] = useState('');
   const [selectedRequestId, setSelectedRequestId] = useState<string | null>(null);
   const [server, setServer] = useState<RoxyProxyServer | null>(null);
   const [cursor, setCursor] = useState(0);
+  const [caStatus, setCaStatus] = useState<CaStatus>({ exists: false, trusted: false, certPath: '' });
+
+  // Check CA status on startup
+  useEffect(() => {
+    checkCaStatus().then(setCaStatus);
+  }, []);
+
+  const proxyRunning = !!server;
+  const menu = buildMenu(proxyRunning, caStatus);
+  const selectableItems = menu.filter((e): e is MenuItem => e.type === 'item');
 
   useInput((input, key) => {
-    // Ctrl+C or q from any screen
     if ((key.ctrl && input === 'c') || (screen === 'menu' && input === 'q')) {
       if (server) server.stop().then(() => exit());
       else exit();
@@ -326,38 +349,31 @@ function App() {
   const handleSelect = async (value: string) => {
     setMessage('');
     switch (value) {
-      case 'start': {
-        setScreen('starting');
-        try {
-          const config = loadConfig();
-          const pidPath = path.join(os.homedir(), '.roxyproxy', 'pid');
-          fs.mkdirSync(path.dirname(pidPath), { recursive: true });
-          fs.writeFileSync(pidPath, process.pid.toString());
-          const s = new RoxyProxyServer(config);
-          const ports = await s.start();
-          setServer(s);
-          setMessage(`Proxy on :${ports.proxyPort}, UI on :${ports.uiPort}`);
-        } catch (e) {
-          setMessage(`Failed: ${(e as Error).message}`);
-        }
-        setScreen('menu');
-        break;
-      }
-      case 'stop': {
-        setScreen('stopping');
-        try {
-          if (server) {
-            await server.stop();
-            setServer(null);
-            setMessage('Proxy stopped.');
-          } else {
-            await apiPost(8081, '/api/shutdown');
-            setMessage('Server shut down.');
+      case 'toggle-proxy': {
+        if (server) {
+          setScreen('working');
+          setWorkingLabel('Stopping proxy...');
+          await server.stop();
+          setServer(null);
+          setMessage('Proxy stopped.');
+          setScreen('menu');
+        } else {
+          setScreen('working');
+          setWorkingLabel('Starting proxy...');
+          try {
+            const config = loadConfig();
+            const pidPath = path.join(os.homedir(), '.roxyproxy', 'pid');
+            fs.mkdirSync(path.dirname(pidPath), { recursive: true });
+            fs.writeFileSync(pidPath, process.pid.toString());
+            const s = new RoxyProxyServer(config);
+            const ports = await s.start();
+            setServer(s);
+            setMessage(`Proxy on :${ports.proxyPort}, UI on :${ports.uiPort}`);
+          } catch (e) {
+            setMessage(`Failed: ${(e as Error).message}`);
           }
-        } catch {
-          setMessage('Proxy is not running.');
+          setScreen('menu');
         }
-        setScreen('menu');
         break;
       }
       case 'status':
@@ -398,21 +414,30 @@ function App() {
         break;
       }
       case 'trust-ca': {
-        setMessage('Installing CA certificate...');
+        setScreen('working');
+        setWorkingLabel('Installing CA certificate...');
         const caResult = await installCaCert();
         setMessage(caResult.message);
+        // Refresh CA status
+        const newStatus = await checkCaStatus();
+        setCaStatus(newStatus);
+        setScreen('menu');
         break;
       }
       case 'proxy-on': {
-        setMessage('Configuring system proxy...');
+        setScreen('working');
+        setWorkingLabel('Configuring system proxy...');
         const onResult = await enableSystemProxy();
         setMessage(onResult.message);
+        setScreen('menu');
         break;
       }
       case 'proxy-off': {
-        setMessage('Removing system proxy...');
+        setScreen('working');
+        setWorkingLabel('Removing system proxy...');
         const offResult = await disableSystemProxy();
         setMessage(offResult.message);
+        setScreen('menu');
         break;
       }
       case 'quit':
@@ -424,26 +449,29 @@ function App() {
 
   // Sub-screens
   if (screen === 'status') {
-    return (<Box flexDirection="column" padding={1}><Header running={!!server} /><StatusView onBack={() => setScreen('menu')} /></Box>);
+    return (<Box flexDirection="column" padding={1}><Header running={proxyRunning} /><StatusView onBack={() => setScreen('menu')} /></Box>);
   }
   if (screen === 'requests') {
-    return (<Box flexDirection="column" padding={1}><Header running={!!server} /><RequestsView onBack={() => setScreen('menu')} onSelect={(id) => { setSelectedRequestId(id); setScreen('request-detail'); }} /></Box>);
+    return (<Box flexDirection="column" padding={1}><Header running={proxyRunning} /><RequestsView onBack={() => setScreen('menu')} onSelect={(id) => { setSelectedRequestId(id); setScreen('request-detail'); }} /></Box>);
   }
   if (screen === 'request-detail' && selectedRequestId) {
-    return (<Box flexDirection="column" padding={1}><Header running={!!server} /><RequestDetailView requestId={selectedRequestId} onBack={() => setScreen('requests')} /></Box>);
+    return (<Box flexDirection="column" padding={1}><Header running={proxyRunning} /><RequestDetailView requestId={selectedRequestId} onBack={() => setScreen('requests')} /></Box>);
   }
-  if (screen === 'starting') {
-    return (<Box flexDirection="column" padding={1}><Header running={!!server} /><Text color="cyan">  Starting proxy...</Text></Box>);
-  }
-  if (screen === 'stopping') {
-    return (<Box flexDirection="column" padding={1}><Header running={!!server} /><Text color="yellow">  Stopping proxy...</Text></Box>);
+  if (screen === 'working') {
+    return (<Box flexDirection="column" padding={1}><Header running={proxyRunning} /><Text color="cyan">  {workingLabel}</Text></Box>);
   }
 
   // Main menu
   return (
     <Box flexDirection="column" padding={1}>
-      <Header running={!!server} />
-      <GroupedMenu cursor={cursor} onSelect={handleSelect} />
+      <Header running={proxyRunning} />
+      {!caStatus.exists && (
+        <Box marginBottom={1}><Text color="yellow">  ! CA certificate not generated yet. Start the proxy first.</Text></Box>
+      )}
+      {caStatus.exists && !caStatus.trusted && (
+        <Box marginBottom={1}><Text color="yellow">  ! CA certificate not trusted. Select "Trust CA certificate" to install.</Text></Box>
+      )}
+      <GroupedMenu menu={menu} cursor={cursor} onSelect={handleSelect} />
       {message && (
         <Box marginTop={1}>
           <Text dimColor>  {message}</Text>

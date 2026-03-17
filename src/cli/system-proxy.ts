@@ -66,6 +66,34 @@ export async function disableSystemProxy(service?: string): Promise<ProxyResult>
   return { ok: false, message: 'Failed to disable system proxy.' };
 }
 
+export interface CaStatus {
+  exists: boolean;
+  trusted: boolean;
+  certPath: string;
+}
+
+export async function checkCaStatus(): Promise<CaStatus> {
+  const certPath = `${os.homedir()}/.roxyproxy/ca/ca.crt`;
+  const { existsSync } = await import('node:fs');
+
+  if (!existsSync(certPath)) {
+    return { exists: false, trusted: false, certPath };
+  }
+
+  if (os.platform() === 'darwin') {
+    const result = await run('security', ['verify-cert', '-c', certPath]);
+    return { exists: true, trusted: result.code === 0, certPath };
+  }
+
+  if (os.platform() === 'linux') {
+    const { existsSync: exists2 } = await import('node:fs');
+    const trusted = exists2('/usr/local/share/ca-certificates/roxyproxy.crt');
+    return { exists: true, trusted, certPath };
+  }
+
+  return { exists: true, trusted: false, certPath };
+}
+
 export async function installCaCert(): Promise<ProxyResult> {
   const fs = await import('node:fs');
   const certPath = `${os.homedir()}/.roxyproxy/ca/ca.crt`;
