@@ -330,7 +330,7 @@ function App() {
 
   // Check status on startup
   useEffect(() => {
-    process.stdout.write('\x1Bc'); // clear screen
+    process.stdout.write('\x1B[2J\x1B[3J\x1B[H'); // clear screen + scrollback + cursor home
     checkCaStatus().then(setCaStatus);
     checkSystemProxyStatus().then(setSystemProxyEnabled);
   }, []);
