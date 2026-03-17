@@ -15,6 +15,7 @@ HTTP/HTTPS intercepting proxy with a CLI and web UI. Captures traffic, stores it
   - [request](#request)
   - [clear](#clear)
   - [trust-ca](#trust-ca)
+  - [untrust-ca](#untrust-ca)
   - [proxy-on](#proxy-on-macos)
   - [proxy-off](#proxy-off-macos)
 - [Web UI](#web-ui)
@@ -264,6 +265,28 @@ roxyproxy trust-ca --no-interactive
 ```
 
 See [HTTPS Interception](#https-interception) for details.
+
+### untrust-ca
+
+Remove the RoxyProxy CA certificate from the system trust store.
+
+```bash
+roxyproxy untrust-ca [options]
+```
+
+| Option | Description |
+|---|---|
+| `--no-interactive` | Skip prompts; print removal instructions |
+
+```bash
+# Interactive (prompts for sudo password)
+roxyproxy untrust-ca
+
+# Non-interactive
+roxyproxy untrust-ca --no-interactive
+```
+
+On macOS, removes via `security remove-trusted-cert`. On Linux, removes from `/usr/local/share/ca-certificates/` and refreshes the store. Skips if the certificate is not currently trusted.
 
 ### proxy-on (macOS)
 
