@@ -79,7 +79,7 @@ function buildMenu(proxyRunning: boolean, caStatus: CaStatus, systemProxyEnabled
 
     { type: 'heading', label: 'Setup' },
     { type: 'item', label: 'Trust CA certificate', value: 'trust-ca', hint: 'Install cert for HTTPS interception', ...caBadge },
-    ...(caStatus.trusted ? [{ type: 'item' as const, label: 'Untrust CA certificate', value: 'untrust-ca', hint: 'Remove cert from system trust store' }] : []),
+    ...(caStatus.trusted ? [{ type: 'item' as const, label: 'Uninstall CA certificate', value: 'uninstall-ca', hint: 'Remove cert from system trust store' }] : []),
     systemProxyEnabled
       ? { type: 'item', label: 'Disable system proxy', value: 'toggle-system-proxy', hint: 'Restore direct connections', badge: 'enabled', badgeColor: 'green' }
       : { type: 'item', label: 'Enable system proxy', value: 'toggle-system-proxy', hint: 'Route all traffic through RoxyProxy', badge: 'disabled', badgeColor: 'gray' },
@@ -467,7 +467,7 @@ function App() {
         setScreen('menu');
         break;
       }
-      case 'untrust-ca': {
+      case 'uninstall-ca': {
         setScreen('working');
         setWorkingLabel('Removing CA certificate...');
         const untrustResult = await uninstallCaCert();

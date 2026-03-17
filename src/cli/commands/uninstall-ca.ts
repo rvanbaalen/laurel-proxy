@@ -25,9 +25,9 @@ function run(cmd: string, args: string[]): Promise<{ code: number; stdout: strin
   });
 }
 
-export function registerUntrustCa(program: Command): void {
+export function registerUninstallCa(program: Command): void {
   program
-    .command('untrust-ca')
+    .command('uninstall-ca')
     .description('Remove the CA certificate from the system trust store')
     .option('--no-interactive', 'Just print instructions without prompting')
     .action(async (opts) => {
