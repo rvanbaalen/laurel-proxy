@@ -6,14 +6,52 @@ version: 1.0.0
 
 # RoxyProxy
 
-RoxyProxy is an HTTP/HTTPS intercepting proxy with a CLI and web UI. It captures traffic, stores it in SQLite, and makes it queryable.
+RoxyProxy is an HTTP/HTTPS intercepting proxy with a CLI and web UI. It captures traffic, stores it in SQLite, and makes it queryable. Developed and tested on **macOS**.
 
 Install: `npm install -g @rvanbaalen/roxyproxy`
 Run without installing: `npx @rvanbaalen/roxyproxy`
 
 ## Quick Reference
 
-### Starting the Proxy
+### One-command traffic monitoring (recommended)
+
+The fastest way to capture and inspect traffic:
+
+```bash
+# Start tailing -- auto-starts proxy + macOS system proxy
+roxyproxy requests --tail
+
+# Tail with a host filter
+roxyproxy requests --host api.example.com --tail
+
+# Tail only errors
+roxyproxy requests --status 500 --tail
+
+# Combine filters
+roxyproxy requests --host stripe.com --method POST --tail
+```
+
+`--tail` automatically:
+1. Starts the proxy if it isn't running
+2. Enables the macOS system proxy (routes all traffic through RoxyProxy)
+3. Opens an interactive terminal TUI
+4. On quit (Ctrl+C), disables the system proxy and stops the proxy it started
+
+**TUI keyboard shortcuts:**
+
+| Key | Action |
+|---|---|
+| `↑` / `↓` | Navigate requests |
+| `Enter` | View full request detail (headers, body) |
+| `Esc` | Back to list from detail view |
+| `g` / `G` | Jump to top (newest) / bottom (oldest) |
+| `Ctrl+C` | Quit (cleans up proxy and system proxy) |
+
+New requests auto-scroll to the top. Scrolling down disables auto-scroll; `g` re-enables it.
+
+For raw JSON streaming instead of the TUI: `roxyproxy requests --format json --tail`
+
+### Starting the Proxy (manual)
 
 ```bash
 # Interactive mode (recommended for first-time use)
@@ -68,10 +106,10 @@ roxyproxy proxy-off    # to disable
 
 ### CLI Queries
 
-The default output is JSON (pipe to `jq` or feed to LLMs):
+The default output is a human-readable table. Use `--format json` for piping to `jq` or LLMs:
 
 ```bash
-# All captured requests (last 100)
+# All captured requests (last 100, table format)
 roxyproxy requests
 
 # Filter by host
@@ -89,17 +127,14 @@ roxyproxy requests --search "/api/v2"
 # Combine filters
 roxyproxy requests --host stripe.com --method POST --status 200
 
-# Human-readable table
-roxyproxy requests --format table --limit 20
+# JSON output for piping
+roxyproxy requests --format json --host example.com | jq '.data[].url'
 
 # Time-bounded
 roxyproxy requests --since "2024-01-15T00:00:00Z"
 
 # Full detail for one request (headers + body)
 roxyproxy request <uuid>
-
-# Pipe to jq
-roxyproxy requests --host example.com | jq '.data[].url'
 ```
 
 **All filter options:**
@@ -113,7 +148,8 @@ roxyproxy requests --host example.com | jq '.data[].url'
 | `--since <time>` | After timestamp (Unix ms or ISO date) |
 | `--until <time>` | Before timestamp (Unix ms or ISO date) |
 | `--limit <n>` | Max results (default: 100) |
-| `--format <fmt>` | `json` (default) or `table` |
+| `--format <fmt>` | `table` (default) or `json` |
+| `--tail` | Real-time interactive TUI (auto-starts proxy) |
 
 ### REST API
 
@@ -179,30 +215,45 @@ Priority: CLI flags > config file > defaults.
 ### Debug a failing API call
 
 ```bash
-roxyproxy start
-# reproduce the issue with traffic going through the proxy
-roxyproxy requests --host api.failing-service.com --status 500 --format table
+# One command -- starts proxy, enables system proxy, shows live traffic
+roxyproxy requests --host api.failing-service.com --tail
+
+# After spotting the failing request, press Enter to see full detail
+# Or query the database after the fact:
+roxyproxy requests --host api.failing-service.com --status 500
 roxyproxy request <uuid-of-failing-request>
 ```
 
 ### Inspect what an app sends to a third-party API
 
 ```bash
-roxyproxy start
-roxyproxy trust-ca          # for HTTPS
-roxyproxy proxy-on          # system-wide on macOS
-# use the app
-roxyproxy requests --host third-party-api.com
-roxyproxy proxy-off
+# Tail traffic filtered to the third-party host
+roxyproxy requests --host third-party-api.com --tail
+
+# For HTTPS, make sure the CA is trusted first:
+roxyproxy trust-ca
 ```
 
 ### Monitor traffic in real-time
 
-Open `http://127.0.0.1:8081` in a browser, or use the SSE stream:
-
 ```bash
+# Interactive TUI (recommended)
+roxyproxy requests --tail
+
+# Or open the web UI
+open http://127.0.0.1:8081
+
+# Or raw SSE stream
 curl -N http://127.0.0.1:8081/api/events
 ```
+
+## Platform Notes
+
+RoxyProxy is developed and tested on **macOS**. Core proxy and query features work on Linux, but these are macOS-only:
+
+- System proxy (`proxy-on` / `proxy-off`) -- uses `networksetup`
+- Auto-enable system proxy with `--tail`
+- CA trust via Keychain (`trust-ca`)
 
 ## Port Conflicts
 

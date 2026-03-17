@@ -4,7 +4,8 @@
 
 <p align="center">
   HTTP/HTTPS intercepting proxy with a CLI and web UI.<br>
-  Captures traffic, stores it in SQLite, and makes it queryable -- by humans and LLMs alike.
+  Captures traffic, stores it in SQLite, and makes it queryable -- by humans and LLMs alike.<br>
+  <strong>Developed and tested on macOS.</strong>
 </p>
 
 <p align="center">
@@ -13,6 +14,7 @@
 
 ## Table of Contents
 
+- [Platform](#platform)
 - [Installation](#installation)
 - [Claude Code Plugin](#claude-code-plugin)
 - [Quick Start](#quick-start)
@@ -37,6 +39,14 @@
 - [Development](#development)
 
 ---
+
+## Platform
+
+RoxyProxy is developed and tested on **macOS**. Core proxy and query functionality works on Linux, but the following features are macOS-only:
+
+- **System proxy** (`proxy-on` / `proxy-off`) -- uses `networksetup`
+- **Auto-enable system proxy** with `--tail` -- routes all macOS traffic through the proxy automatically
+- **CA trust** (`trust-ca`) -- uses macOS Keychain; Linux support exists but is less tested
 
 ## Installation
 
@@ -93,6 +103,20 @@ Just ask Claude anything about intercepting or inspecting HTTP traffic and it wi
 
 ## Quick Start
 
+The fastest way to start capturing traffic:
+
+```bash
+# One command: starts proxy, enables system proxy, opens interactive TUI
+roxyproxy requests --tail
+
+# Filter for a specific host
+roxyproxy requests --host api.example.com --tail
+```
+
+This auto-starts the proxy, routes macOS system traffic through it, and opens a live terminal UI. Press Ctrl+C to quit -- the system proxy is automatically disabled.
+
+### Manual setup
+
 ```bash
 # Start the proxy (default: proxy on :8080, web UI on :8081)
 roxyproxy start
@@ -101,7 +125,7 @@ roxyproxy start
 curl -x http://127.0.0.1:8080 http://httpbin.org/get
 
 # View captured traffic
-roxyproxy requests --format table
+roxyproxy requests
 
 # Open the web UI
 open http://127.0.0.1:8081
@@ -235,10 +259,12 @@ roxyproxy requests [options]
 | `--since <time>` | | After this time (Unix ms or ISO date) |
 | `--until <time>` | | Before this time (Unix ms or ISO date) |
 | `--limit <n>` | `100` | Maximum number of results |
-| `--format <format>` | `json` | Output format: `json` or `table` |
+| `--format <format>` | `table` | Output format: `table` (default) or `json` |
+| `--tail` | | Stream new requests in real-time (interactive TUI) |
+| `--ui-port <number>` | `8081` | UI/API port (used with `--tail`) |
 | `--db-path <path>` | `~/.roxyproxy/data.db` | Database location |
 
-The default JSON output is designed for piping to `jq` or feeding to LLMs:
+The default output is a human-readable table. Use `--format json` for piping to `jq` or feeding to LLMs:
 
 ```bash
 # All 500 errors
@@ -250,15 +276,50 @@ roxyproxy requests --host api.example.com --method POST
 # Search URLs
 roxyproxy requests --search "/api/v2"
 
-# Human-readable table
+# Limit results
 roxyproxy requests --format table --limit 20
 
 # Time-bounded query
 roxyproxy requests --since "2024-01-15T00:00:00Z" --until "2024-01-16T00:00:00Z"
 
-# Pipe to jq
-roxyproxy requests --host stripe.com | jq '.data[].url'
+# JSON for piping to jq
+roxyproxy requests --format json --host stripe.com | jq '.data[].url'
 ```
+
+#### Real-time tailing
+
+The `--tail` flag launches an interactive terminal UI that streams new requests as they arrive:
+
+```bash
+# Tail all traffic (auto-starts proxy + system proxy if needed)
+roxyproxy requests --tail
+
+# Tail with filters
+roxyproxy requests --host todoist.com --tail
+roxyproxy requests --status 500 --tail
+roxyproxy requests --method POST --host api.example.com --tail
+```
+
+**What `--tail` does automatically:**
+
+1. **Starts the proxy** if it isn't already running
+2. **Enables the macOS system proxy** so all traffic routes through RoxyProxy
+3. Opens an interactive TUI with arrow-key navigation
+4. On quit (Ctrl+C), **disables the system proxy** and stops the proxy it started
+
+**TUI keyboard shortcuts:**
+
+| Key | Action |
+|---|---|
+| `↑` / `↓` | Navigate requests |
+| `Enter` | View full request detail (headers, body) |
+| `Esc` | Back to list from detail view |
+| `g` / `G` | Jump to top (newest) / bottom (oldest) |
+| `Ctrl+C` | Quit (cleans up proxy and system proxy) |
+
+New requests auto-scroll to the top. Scrolling down disables auto-scroll; pressing `g` re-enables it.
+
+To get raw JSON streaming instead of the TUI, use `--format json --tail`.
 
 ### request
 
@@ -710,6 +771,8 @@ src/
 ├── cli/                # CLI entry point, commands, interactive mode
 │   ├── index.ts        # Command registration (Commander.js)
 │   ├── interactive.tsx  # Interactive terminal menu (Ink/React)
+│   ├── tail-ui.tsx     # Real-time tail TUI (Ink/React)
+│   ├── format.ts       # Table/JSON output formatting
 │   ├── commands/       # Individual CLI commands
 │   └── system-proxy.ts # macOS system proxy & CA management
 ├── server/             # Proxy server, API, SSL, events
