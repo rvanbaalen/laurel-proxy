@@ -141,3 +141,39 @@ export async function installCaCert(): Promise<ProxyResult> {
 
   return { ok: false, message: `Automatic install not supported on ${os.platform()}.` };
 }
+
+export async function uninstallCaCert(): Promise<ProxyResult> {
+  const certPath = `${os.homedir()}/.roxyproxy/ca/ca.crt`;
+  const fs = await import('node:fs');
+  if (!fs.existsSync(certPath)) {
+    return { ok: false, message: 'CA certificate not found. Nothing to remove.' };
+  }
+
+  if (os.platform() === 'darwin') {
+    const verify = await run('security', ['verify-cert', '-c', certPath]);
+    if (verify.code !== 0) {
+      return { ok: true, message: 'Certificate is not currently trusted.' };
+    }
+    const result = await run('sudo', ['security', 'remove-trusted-cert', '-d', certPath]);
+    if (result.code === 0) {
+      return { ok: true, message: 'Certificate removed from system trust store.' };
+    }
+    return { ok: false, message: 'Failed to remove certificate. Check sudo permissions.' };
+  }
+
+  if (os.platform() === 'linux') {
+    const targetPath = '/usr/local/share/ca-certificates/roxyproxy.crt';
+    if (!fs.existsSync(targetPath)) {
+      return { ok: true, message: 'Certificate is not currently installed.' };
+    }
+    const rm = await run('sudo', ['rm', '-f', targetPath]);
+    if (rm.code !== 0) return { ok: false, message: 'Failed to remove certificate file.' };
+    const update = await run('sudo', ['update-ca-certificates', '--fresh']);
+    if (update.code === 0) {
+      return { ok: true, message: 'Certificate removed from system trust store.' };
+    }
+    return { ok: false, message: 'Failed to update certificate store.' };
+  }
+
+  return { ok: false, message: `Automatic removal not supported on ${os.platform()}.` };
+}

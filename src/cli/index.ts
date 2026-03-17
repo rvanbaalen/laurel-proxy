@@ -7,6 +7,7 @@ import { registerRequests } from './commands/requests.js';
 import { registerRequest } from './commands/request.js';
 import { registerClear } from './commands/clear.js';
 import { registerTrustCa } from './commands/trust-ca.js';
+import { registerUntrustCa } from './commands/untrust-ca.js';
 import { registerProxyOn } from './commands/proxy-on.js';
 import { registerProxyOff } from './commands/proxy-off.js';
 
@@ -32,6 +33,7 @@ registerRequests(program);
 registerRequest(program);
 registerClear(program);
 registerTrustCa(program);
+registerUntrustCa(program);
 registerProxyOn(program);
 registerProxyOff(program);
 
