@@ -1,6 +1,5 @@
 import React, { useState, useEffect } from 'react';
 import { render, Box, Text, useApp, useInput } from 'ink';
-import SelectInput from 'ink-select-input';
 import http from 'node:http';
 import { execFile } from 'node:child_process';
 import path from 'node:path';
@@ -40,18 +39,102 @@ function apiPost(port: number, urlPath: string): Promise<void> {
   });
 }
 
-// ── Screens ──
+// ── Menu ──
 
-type Screen = 'menu' | 'status' | 'requests' | 'request-detail' | 'starting' | 'stopping';
+interface MenuItem {
+  type: 'item';
+  label: string;
+  value: string;
+  hint?: string;
+}
 
-function Header() {
+interface MenuHeading {
+  type: 'heading';
+  label: string;
+}
+
+type MenuEntry = MenuItem | MenuHeading;
+
+const MENU: MenuEntry[] = [
+  { type: 'heading', label: 'Proxy' },
+  { type: 'item', label: 'Start proxy', value: 'start', hint: 'Launch the intercepting proxy' },
+  { type: 'item', label: 'Stop proxy', value: 'stop', hint: 'Shut down the proxy server' },
+  { type: 'item', label: 'Status', value: 'status', hint: 'View proxy status and stats' },
+
+  { type: 'heading', label: 'Traffic' },
+  { type: 'item', label: 'View requests', value: 'requests', hint: 'Browse captured traffic' },
+  { type: 'item', label: 'Clear traffic', value: 'clear', hint: 'Delete all captured requests' },
+  { type: 'item', label: 'Open web UI', value: 'open-ui', hint: 'Open dashboard in browser' },
+
+  { type: 'heading', label: 'Setup' },
+  { type: 'item', label: 'Trust CA certificate', value: 'trust-ca', hint: 'Install cert for HTTPS interception' },
+  { type: 'item', label: 'Set system proxy', value: 'proxy-on', hint: 'Route all traffic through RoxyProxy' },
+  { type: 'item', label: 'Remove system proxy', value: 'proxy-off', hint: 'Restore direct connections' },
+
+  { type: 'heading', label: '' },
+  { type: 'item', label: 'Quit', value: 'quit' },
+];
+
+const selectableItems = MENU.filter((e): e is MenuItem => e.type === 'item');
+
+function GroupedMenu({ cursor, onSelect }: { cursor: number; onSelect: (value: string) => void }) {
+  let itemIndex = 0;
+
+  useInput((_input, key) => {
+    if (key.return) {
+      onSelect(selectableItems[cursor].value);
+    }
+  });
+
   return (
-    <Box flexDirection="column" marginBottom={1}>
-      <Text bold color="cyan">roxyproxy</Text>
-      <Text dimColor>─────────────────────────────────</Text>
+    <Box flexDirection="column">
+      {MENU.map((entry, i) => {
+        if (entry.type === 'heading') {
+          if (!entry.label) return <Text key={i}> </Text>;
+          return (
+            <Box key={i} marginTop={i > 0 ? 1 : 0}>
+              <Text dimColor bold>{entry.label.toUpperCase()}</Text>
+            </Box>
+          );
+        }
+
+        const idx = itemIndex++;
+        const selected = idx === cursor;
+
+        return (
+          <Box key={entry.value}>
+            <Text color="cyan">{selected ? ' ▸ ' : '   '}</Text>
+            <Text bold={selected}>{entry.label}</Text>
+            {entry.hint && !selected ? <Text> </Text> : null}
+            {entry.hint && selected ? <Text dimColor>  {entry.hint}</Text> : null}
+          </Box>
+        );
+      })}
     </Box>
   );
 }
+
+// ── Header ──
+
+function Header({ running }: { running: boolean }) {
+  return (
+    <Box flexDirection="column" marginBottom={1}>
+      <Text color="cyan">{'  ___                ___                    '}</Text>
+      <Text color="cyan">{' | _ \\___ __ ___  _ | _ \\_ _ _____ ___  _  '}</Text>
+      <Text color="cyan">{' |   / _ \\\\ \\ / || || ___/ \'_/ _ \\ \\ /| || |'}</Text>
+      <Text color="cyan">{' |_|_\\___//_\\_\\\\_, ||_|  |_| \\___/_\\_\\ \\_, |'}</Text>
+      <Text color="cyan">{'                |__/                   |__/ '}</Text>
+      <Box marginTop={0}>
+        <Text dimColor>  HTTP/HTTPS intercepting proxy</Text>
+        {running && <Text color="green">  ● running</Text>}
+      </Box>
+    </Box>
+  );
+}
+
+// ── Sub-screens ──
+
+type Screen = 'menu' | 'status' | 'requests' | 'request-detail' | 'starting' | 'stopping';
 
 function StatusView({ onBack }: { onBack: () => void }) {
   const [status, setStatus] = useState<Record<string, unknown> | null>(null);
@@ -80,7 +163,7 @@ function StatusView({ onBack }: { onBack: () => void }) {
       <Box><Text>  </Text><Text dimColor>Proxy      </Text><Text>port </Text><Text color="cyan">{String(status.proxyPort)}</Text></Box>
       <Box><Text>  </Text><Text dimColor>Requests   </Text><Text bold>{String(status.requestCount)}</Text></Box>
       <Box><Text>  </Text><Text dimColor>DB Size    </Text><Text>{size}</Text></Box>
-      <Box marginTop={1}><Text dimColor>Press Enter or Esc to go back</Text></Box>
+      <Box marginTop={1}><Text dimColor>Enter or Esc to go back</Text></Box>
     </Box>
   );
 }
@@ -92,9 +175,8 @@ function RequestsView({ onBack, onSelect }: { onBack: () => void; onSelect: (id:
 
   useEffect(() => {
     const config = loadConfig();
-    let db: Database;
     try {
-      db = new Database(config.dbPath);
+      const db = new Database(config.dbPath);
       const result = db.query({ limit: 20 });
       setRequests(result.data);
       db.close();
@@ -103,7 +185,7 @@ function RequestsView({ onBack, onSelect }: { onBack: () => void; onSelect: (id:
     }
   }, []);
 
-  useInput((input, key) => {
+  useInput((_input, key) => {
     if (key.escape) { onBack(); return; }
     if (key.upArrow && cursor > 0) setCursor(c => c - 1);
     if (key.downArrow && cursor < requests.length - 1) setCursor(c => c + 1);
@@ -114,11 +196,11 @@ function RequestsView({ onBack, onSelect }: { onBack: () => void; onSelect: (id:
   if (requests.length === 0) return (
     <Box flexDirection="column">
       <Text dimColor>  No requests captured yet.</Text>
-      <Box marginTop={1}><Text dimColor>Press Esc to go back</Text></Box>
+      <Box marginTop={1}><Text dimColor>Esc to go back</Text></Box>
     </Box>
   );
 
-  const methodColor = (m: string) => {
+  const methodColor = (m: string): string => {
     if (m === 'GET') return 'blue';
     if (m === 'POST') return 'green';
     if (m === 'PUT') return 'yellow';
@@ -126,7 +208,7 @@ function RequestsView({ onBack, onSelect }: { onBack: () => void; onSelect: (id:
     return 'white';
   };
 
-  const statusColor = (s: number | null) => {
+  const statusColor = (s: number | null): string => {
     if (!s) return 'gray';
     if (s < 300) return 'green';
     if (s < 400) return 'yellow';
@@ -140,7 +222,7 @@ function RequestsView({ onBack, onSelect }: { onBack: () => void; onSelect: (id:
       <Text dimColor>{'  ' + '─'.repeat(70)}</Text>
       {requests.map((r, i) => (
         <Box key={r.id}>
-          <Text>{i === cursor ? '▸ ' : '  '}</Text>
+          <Text color="cyan">{i === cursor ? '▸ ' : '  '}</Text>
           <Text color={methodColor(r.method)}>{r.method.padEnd(8)}</Text>
           <Text color={statusColor(r.status)}>{String(r.status ?? '-').padEnd(8)}</Text>
           <Text>{r.host.slice(0, 24).padEnd(25)}</Text>
@@ -190,12 +272,12 @@ function RequestDetailView({ requestId, onBack }: { requestId: string; onBack: (
 
       <Box marginTop={1}><Text bold>Request Headers</Text></Box>
       {Object.entries(reqHeaders).map(([k, v]) => (
-        <Box key={k}><Text color="magenta">  {k}</Text><Text dimColor>: </Text><Text>{v}</Text></Box>
+        <Box key={k}><Text color="magenta">  {k}</Text><Text dimColor>: </Text><Text>{String(v)}</Text></Box>
       ))}
 
       <Box marginTop={1}><Text bold>Response Headers</Text></Box>
       {Object.entries(resHeaders).map(([k, v]) => (
-        <Box key={k}><Text color="magenta">  {k}</Text><Text dimColor>: </Text><Text>{v}</Text></Box>
+        <Box key={k}><Text color="magenta">  {k}</Text><Text dimColor>: </Text><Text>{String(v)}</Text></Box>
       ))}
 
       {record.response_body && (
@@ -205,7 +287,7 @@ function RequestDetailView({ requestId, onBack }: { requestId: string; onBack: (
         </>
       )}
 
-      <Box marginTop={1}><Text dimColor>Press Enter or Esc to go back</Text></Box>
+      <Box marginTop={1}><Text dimColor>Enter or Esc to go back</Text></Box>
     </Box>
   );
 }
@@ -227,23 +309,17 @@ function App() {
   const [message, setMessage] = useState('');
   const [selectedRequestId, setSelectedRequestId] = useState<string | null>(null);
   const [server, setServer] = useState<RoxyProxyServer | null>(null);
+  const [cursor, setCursor] = useState(0);
 
-  const menuItems = [
-    { label: 'Start proxy', value: 'start' },
-    { label: 'Stop proxy', value: 'stop' },
-    { label: 'Status', value: 'status' },
-    { label: 'View requests', value: 'requests' },
-    { label: 'Clear traffic', value: 'clear' },
-    { label: 'Open web UI', value: 'open-ui' },
-    { label: 'Trust CA certificate', value: 'trust-ca' },
-    { label: 'Set system proxy', value: 'proxy-on' },
-    { label: 'Remove system proxy', value: 'proxy-off' },
-    { label: 'Quit', value: 'quit' },
-  ];
+  useInput((_input, key) => {
+    if (screen !== 'menu') return;
+    if (key.upArrow) setCursor(c => Math.max(0, c - 1));
+    if (key.downArrow) setCursor(c => Math.min(selectableItems.length - 1, c + 1));
+  });
 
-  const handleSelect = async (item: { value: string }) => {
+  const handleSelect = async (value: string) => {
     setMessage('');
-    switch (item.value) {
+    switch (value) {
       case 'start': {
         setScreen('starting');
         try {
@@ -254,7 +330,7 @@ function App() {
           const s = new RoxyProxyServer(config);
           const ports = await s.start();
           setServer(s);
-          setMessage(`Proxy running on :${ports.proxyPort}, UI on :${ports.uiPort}`);
+          setMessage(`Proxy on :${ports.proxyPort}, UI on :${ports.uiPort}`);
         } catch (e) {
           setMessage(`Failed: ${(e as Error).message}`);
         }
@@ -270,7 +346,7 @@ function App() {
             setMessage('Proxy stopped.');
           } else {
             await apiPost(8081, '/api/shutdown');
-            setMessage('Server shutting down.');
+            setMessage('Server shut down.');
           }
         } catch {
           setMessage('Proxy is not running.');
@@ -296,7 +372,6 @@ function App() {
           });
           setMessage('Traffic cleared.');
         } catch {
-          // Try direct DB clear
           try {
             const config = loadConfig();
             const db = new Database(config.dbPath);
@@ -335,68 +410,39 @@ function App() {
         break;
       }
       case 'quit':
-        if (server) {
-          await server.stop();
-        }
+        if (server) await server.stop();
         exit();
         break;
     }
   };
 
+  // Sub-screens
   if (screen === 'status') {
-    return (
-      <Box flexDirection="column" padding={1}>
-        <Header />
-        <StatusView onBack={() => setScreen('menu')} />
-      </Box>
-    );
+    return (<Box flexDirection="column" padding={1}><Header running={!!server} /><StatusView onBack={() => setScreen('menu')} /></Box>);
   }
-
   if (screen === 'requests') {
-    return (
-      <Box flexDirection="column" padding={1}>
-        <Header />
-        <RequestsView
-          onBack={() => setScreen('menu')}
-          onSelect={(id) => { setSelectedRequestId(id); setScreen('request-detail'); }}
-        />
-      </Box>
-    );
+    return (<Box flexDirection="column" padding={1}><Header running={!!server} /><RequestsView onBack={() => setScreen('menu')} onSelect={(id) => { setSelectedRequestId(id); setScreen('request-detail'); }} /></Box>);
   }
-
   if (screen === 'request-detail' && selectedRequestId) {
-    return (
-      <Box flexDirection="column" padding={1}>
-        <Header />
-        <RequestDetailView requestId={selectedRequestId} onBack={() => setScreen('requests')} />
-      </Box>
-    );
+    return (<Box flexDirection="column" padding={1}><Header running={!!server} /><RequestDetailView requestId={selectedRequestId} onBack={() => setScreen('requests')} /></Box>);
   }
-
   if (screen === 'starting') {
-    return (
-      <Box flexDirection="column" padding={1}>
-        <Header />
-        <Text color="cyan">Starting proxy...</Text>
-      </Box>
-    );
+    return (<Box flexDirection="column" padding={1}><Header running={!!server} /><Text color="cyan">  Starting proxy...</Text></Box>);
   }
-
   if (screen === 'stopping') {
-    return (
-      <Box flexDirection="column" padding={1}>
-        <Header />
-        <Text color="yellow">Stopping proxy...</Text>
-      </Box>
-    );
+    return (<Box flexDirection="column" padding={1}><Header running={!!server} /><Text color="yellow">  Stopping proxy...</Text></Box>);
   }
 
+  // Main menu
   return (
     <Box flexDirection="column" padding={1}>
-      <Header />
-      {server && <Box marginBottom={1}><Text color="green">● Proxy running</Text></Box>}
-      <SelectInput items={menuItems} onSelect={handleSelect} />
-      {message && <Box marginTop={1}><Text color="cyan">  {message}</Text></Box>}
+      <Header running={!!server} />
+      <GroupedMenu cursor={cursor} onSelect={handleSelect} />
+      {message && (
+        <Box marginTop={1}>
+          <Text dimColor>  {message}</Text>
+        </Box>
+      )}
     </Box>
   );
 }

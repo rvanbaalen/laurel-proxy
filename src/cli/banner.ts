@@ -2,8 +2,11 @@ import pc from 'picocolors';
 
 export function printBanner(): void {
   console.log('');
-  console.log(`  ${pc.bold(pc.cyan('roxyproxy'))} ${pc.dim('v0.1.0')}`);
-  console.log(pc.dim('  ' + '─'.repeat(40)));
+  console.log(pc.cyan('  ___                ___                    '));
+  console.log(pc.cyan(' | _ \\___ __ ___  _ | _ \\_ _ _____ ___  _  '));
+  console.log(pc.cyan(' |   / _ \\\\ \\ / || || ___/ \'_/ _ \\ \\ /| || |'));
+  console.log(pc.cyan(' |_|_\\___//_\\_\\\\_, ||_|  |_| \\___/_\\_\\ \\_, |'));
+  console.log(pc.cyan('                |__/                   |__/ '));
   console.log('');
 }
 
