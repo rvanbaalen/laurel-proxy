@@ -1,5 +1,6 @@
 import type { Command } from 'commander';
 import http from 'node:http';
+import { printSuccess, printError } from '../banner.js';
 
 export function registerClear(program: Command): void {
   program
@@ -10,9 +11,9 @@ export function registerClear(program: Command): void {
       const port = parseInt(opts.uiPort, 10);
       try {
         await apiDelete(port, '/api/requests');
-        console.log('All traffic cleared.');
+        printSuccess('All traffic cleared.');
       } catch {
-        console.error('Could not clear. Is the proxy running?');
+        printError('Could not clear. Is the proxy running?');
         process.exit(1);
       }
     });

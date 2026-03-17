@@ -3,6 +3,7 @@ import http from 'node:http';
 import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
+import { printSuccess, printError } from '../banner.js';
 
 export function registerStop(program: Command): void {
   program
@@ -14,7 +15,7 @@ export function registerStop(program: Command): void {
 
       try {
         await apiPost(port, '/api/shutdown');
-        console.log('Server shutting down.');
+        printSuccess('Server shutting down.');
         return;
       } catch {}
 
@@ -24,12 +25,12 @@ export function registerStop(program: Command): void {
         try {
           process.kill(pid, 'SIGTERM');
           fs.unlinkSync(pidPath);
-          console.log(`Sent SIGTERM to process ${pid}.`);
+          printSuccess(`Sent SIGTERM to process ${pid}.`);
           return;
         } catch {}
       }
 
-      console.error('Could not stop proxy. Is it running?');
+      printError('Could not stop proxy. Is it running?');
       process.exit(1);
     });
 }
