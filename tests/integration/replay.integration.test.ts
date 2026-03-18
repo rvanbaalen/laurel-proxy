@@ -140,3 +140,103 @@ describe('recordToReplayRequest', () => {
     expect(result.body).toBeUndefined();
   });
 });
+
+import { RoxyProxyServer } from '../../src/server/index.js';
+import { DEFAULT_CONFIG } from '../../src/shared/types.js';
+import type { Config } from '../../src/shared/types.js';
+import path from 'node:path';
+import os from 'node:os';
+import fs from 'node:fs';
+import { randomUUID } from 'node:crypto';
+
+describe('POST /api/replay', () => {
+  let targetServer: http.Server;
+  let targetPort: number;
+  let proxy: RoxyProxyServer;
+  let uiPort: number;
+  let tmpDir: string;
+
+  beforeAll(async () => {
+    targetServer = http.createServer((req, res) => {
+      let body = '';
+      req.on('data', (chunk) => { body += chunk; });
+      req.on('end', () => {
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ method: req.method, path: req.url, body: body || null }));
+      });
+    });
+    await new Promise<void>((resolve) => {
+      targetServer.listen(0, '127.0.0.1', () => {
+        targetPort = (targetServer.address() as net.AddressInfo).port;
+        resolve();
+      });
+    });
+
+    tmpDir = path.join(os.tmpdir(), `roxyproxy-replay-${randomUUID()}`);
+    fs.mkdirSync(tmpDir, { recursive: true });
+    const config: Config = { ...DEFAULT_CONFIG, proxyPort: 0, uiPort: 0, dbPath: path.join(tmpDir, 'data.db') };
+    proxy = new RoxyProxyServer(config);
+    const ports = await proxy.start();
+    uiPort = ports.uiPort;
+  });
+
+  afterAll(async () => {
+    await proxy.stop();
+    targetServer.close();
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  it('replays a GET request via API', async () => {
+    const reqBody = JSON.stringify({
+      url: `http://127.0.0.1:${targetPort}/replay-test`,
+      method: 'GET',
+      headers: {},
+    });
+
+    const res = await new Promise<{ status: number; body: string }>((resolve, reject) => {
+      const req = http.request({
+        hostname: '127.0.0.1',
+        port: uiPort,
+        path: '/api/replay',
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+      }, (res) => {
+        let body = '';
+        res.on('data', (chunk) => { body += chunk; });
+        res.on('end', () => resolve({ status: res.statusCode!, body }));
+      });
+      req.on('error', reject);
+      req.write(reqBody);
+      req.end();
+    });
+
+    expect(res.status).toBe(200);
+    const parsed = JSON.parse(res.body);
+    expect(parsed.status).toBe(200);
+    expect(parsed.duration).toBeGreaterThanOrEqual(0);
+    expect(parsed.size).toBeGreaterThan(0);
+  });
+
+  it('returns 400 for missing URL', async () => {
+    const reqBody = JSON.stringify({ method: 'GET', headers: {} });
+
+    const res = await new Promise<{ status: number; body: string }>((resolve, reject) => {
+      const req = http.request({
+        hostname: '127.0.0.1',
+        port: uiPort,
+        path: '/api/replay',
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+      }, (res) => {
+        let body = '';
+        res.on('data', (chunk) => { body += chunk; });
+        res.on('end', () => resolve({ status: res.statusCode!, body }));
+      });
+      req.on('error', reject);
+      req.write(reqBody);
+      req.end();
+    });
+
+    expect(res.status).toBe(400);
+  });
+});

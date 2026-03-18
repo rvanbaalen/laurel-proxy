@@ -6,6 +6,8 @@ import type { Database } from '../storage/db.js';
 import type { EventManager } from './events.js';
 import type { RequestFilter, RequestRecord } from '../shared/types.js';
 import type { CertificateAuthority } from './ssl.js';
+import type { ReplayRequest } from '../shared/types.js';
+import { replay } from './replay.js';
 
 function serializeRecord(r: RequestRecord): Record<string, unknown> {
   return {
@@ -112,6 +114,29 @@ export function createApiRouter(
       res.json({ ok: true });
     } catch (err) {
       res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  router.post('/replay', async (req: Request, res: Response) => {
+    const { url, method, headers, body } = req.body as ReplayRequest;
+    if (!url || (!url.startsWith('http://') && !url.startsWith('https://'))) {
+      res.status(400).json({ error: 'Invalid or missing URL (must start with http:// or https://)' });
+      return;
+    }
+    if (!method) {
+      res.status(400).json({ error: 'Missing HTTP method' });
+      return;
+    }
+    try {
+      const result = await replay({ url, method, headers: headers || {}, body });
+      res.json(result);
+    } catch (err) {
+      const message = (err as Error).message;
+      if (message.includes('timed out')) {
+        res.status(504).json({ error: message });
+      } else {
+        res.status(502).json({ error: message });
+      }
     }
   });
 
