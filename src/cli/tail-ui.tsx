@@ -32,6 +32,21 @@ function formatBytes(bytes: number): string {
   return `${(bytes / (1024 * 1024)).toFixed(1)}MB`;
 }
 
+// ── Body helpers ──
+
+function getContentTypeFromHeaders(headersJson: string): string | null {
+  try {
+    const h = JSON.parse(headersJson);
+    const key = Object.keys(h).find(k => k.toLowerCase() === 'content-type');
+    return key ? String(h[key]) : null;
+  } catch { return null; }
+}
+
+function looksLikeJson(str: string): boolean {
+  const trimmed = str.trimStart();
+  return trimmed.startsWith('{') || trimmed.startsWith('[');
+}
+
 // ── Filter matching ──
 
 function matchesFilter(record: RequestRecord, filter: RequestFilter): boolean {
@@ -101,13 +116,28 @@ function DetailView({ record, onBack }: { record: RequestRecord; onBack: () => v
     try { return JSON.parse(raw); } catch { return {}; }
   };
 
-  const formatBody = (body: Buffer | null, contentType: string | null): string => {
-    if (!body) return '(empty)';
-    const str = Buffer.isBuffer(body) ? body.toString('utf-8') : String(body);
-    if (contentType?.includes('json')) {
-      try { return JSON.stringify(JSON.parse(str), null, 2); } catch { /* fallthrough */ }
+  const decodeBody = (body: Buffer | string | null): string | null => {
+    if (!body) return null;
+    if (Buffer.isBuffer(body)) return body.toString('utf-8');
+    // SSE records have base64-encoded bodies
+    if (typeof body === 'string') {
+      try { return Buffer.from(body, 'base64').toString('utf-8'); } catch { return body; }
     }
-    return str.slice(0, 2000);
+    return String(body);
+  };
+
+  const formatBody = (body: Buffer | string | null, headers: string | null): string => {
+    const str = decodeBody(body);
+    if (!str) return '(empty)';
+    const ct = headers ? getContentTypeFromHeaders(headers) : null;
+    const isJson = ct?.includes('json') || (!ct && looksLikeJson(str));
+    if (isJson) {
+      try {
+        const pretty = JSON.stringify(JSON.parse(str), null, 2);
+        return pretty.split('\n').map(line => `    ${line}`).join('\n');
+      } catch { /* fallthrough */ }
+    }
+    return str.slice(0, 2000).split('\n').map(line => `    ${line}`).join('\n');
   };
 
   const renderHeaders = (raw: string | null) => {
@@ -166,7 +196,7 @@ function DetailView({ record, onBack }: { record: RequestRecord; onBack: () => v
           {r.request_body && (
             <>
               <Box marginTop={1}><Text bold>  Body</Text></Box>
-              <Text>    {formatBody(r.request_body, r.content_type)}</Text>
+              <Text>{formatBody(r.request_body, r.request_headers)}</Text>
             </>
           )}
           {!r.request_body && (
@@ -182,7 +212,7 @@ function DetailView({ record, onBack }: { record: RequestRecord; onBack: () => v
           {r.response_body && (
             <>
               <Box marginTop={1}><Text bold>  Body</Text></Box>
-              <Text>    {formatBody(r.response_body, r.content_type)}</Text>
+              <Text>{formatBody(r.response_body, r.response_headers)}</Text>
             </>
           )}
           {!r.response_body && (
