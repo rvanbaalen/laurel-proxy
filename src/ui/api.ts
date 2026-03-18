@@ -25,6 +25,7 @@ export interface ProxyStatus {
   proxyPort: number;
   requestCount: number;
   dbSizeBytes: number;
+  hostname?: string;
 }
 
 export interface PaginatedResponse {

@@ -1,6 +1,7 @@
 import { Router } from 'express';
 import type { Request, Response } from 'express';
 import fs from 'node:fs';
+import os from 'node:os';
 import type { Database } from '../storage/db.js';
 import type { EventManager } from './events.js';
 import type { RequestFilter, RequestRecord } from '../shared/types.js';
@@ -75,6 +76,7 @@ export function createApiRouter(
       proxyPort: proxy.getProxyPort(),
       requestCount: db.getRequestCount(),
       dbSizeBytes: db.getDbSize(),
+      hostname: os.hostname(),
     });
   });
 
@@ -90,7 +92,7 @@ export function createApiRouter(
     }
     res.setHeader('Content-Type', 'application/x-x509-ca-cert');
     res.setHeader('Content-Disposition', 'attachment; filename="roxyproxy-ca.crt"');
-    res.sendFile(certPath);
+    fs.createReadStream(certPath).pipe(res);
   });
 
   router.post('/proxy/start', async (_req: Request, res: Response) => {

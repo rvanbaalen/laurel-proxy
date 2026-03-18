@@ -56,6 +56,12 @@ export function Controls({ onClear, statusEvent }: ControlsProps) {
           <span>Port: {status.proxyPort}</span>
           <span>Requests: {status.requestCount}</span>
           <span>DB: {formatBytes(status.dbSizeBytes)}</span>
+          <a href="/api/ca.crt" download className="text-cyan-400 hover:text-cyan-300 underline underline-offset-2">CA Cert</a>
+          {status.hostname && (
+            <span className="text-gray-500" title="Open this URL on your iOS device to access the web UI and download the CA cert">
+              Network: <a href={`http://${status.hostname}:${window.location.port || 8081}`} className="text-cyan-400 hover:text-cyan-300 underline underline-offset-2">{status.hostname}:{window.location.port || 8081}</a>
+            </span>
+          )}
         </div>
       )}
     </div>

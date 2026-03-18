@@ -529,17 +529,20 @@ RoxyProxy can inspect HTTP/HTTPS traffic from an iOS device. Your computer and i
 roxyproxy start
 ```
 
-**Step 2: Find your computer's local IP address**
+**Step 2: Note your computer's network address**
 
-```bash
-# macOS
-ipconfig getifaddr en0
+The CLI prints a `Network` line on startup with your hostname, e.g.:
 
-# Linux
-hostname -I | awk '{print $1}'
+```
+  ● Network  http://robins-macbook.local:8081
 ```
 
-Note the IP (e.g., `192.168.1.42`).
+You can also find your IP manually:
+
+```bash
+ipconfig getifaddr en0    # macOS
+hostname -I | awk '{print $1}'  # Linux
+```
 
 **Step 3: Configure the iOS device to use the proxy**
 
@@ -547,7 +550,7 @@ Note the IP (e.g., `192.168.1.42`).
 2. Tap the **(i)** icon next to your connected network
 3. Scroll down and tap **Configure Proxy**
 4. Select **Manual**
-5. Set **Server** to your computer's IP (e.g., `192.168.1.42`)
+5. Set **Server** to your computer's hostname or IP (e.g., `robins-macbook.local` or `192.168.1.42`)
 6. Set **Port** to `8080`
 7. Tap **Save**
 
@@ -555,13 +558,15 @@ HTTP traffic is now being captured. For HTTPS inspection, continue below.
 
 **Step 4: Install the CA certificate on iOS**
 
-Open Safari on your iOS device and navigate to:
+Open Safari on your iOS device and navigate to the network address shown in the CLI or web UI:
 
 ```
-http://<your-computer-ip>:8081/api/ca.crt
+http://robins-macbook.local:8081/api/ca.crt
 ```
 
-For example: `http://192.168.1.42:8081/api/ca.crt`
+Or use the IP directly: `http://192.168.1.42:8081/api/ca.crt`
+
+You can also open the web UI (`http://robins-macbook.local:8081`) and tap the **CA Cert** link in the toolbar.
 
 Safari will prompt you to download a configuration profile. Tap **Allow**.
 
