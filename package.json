@@ -1,6 +1,6 @@
 {
   "name": "@rvanbaalen/roxyproxy",
-  "version": "0.1.5",
+  "version": "0.1.6",
   "description": "HTTP/HTTPS intercepting proxy with CLI and web UI",
   "type": "module",
   "bin": {

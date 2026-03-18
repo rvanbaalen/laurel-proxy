@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.1.6](https://github.com/rvanbaalen/roxyproxy/compare/roxyproxy-v0.1.5...roxyproxy-v0.1.6) (2026-03-18)
+
+
+### Features
+
+* add POST /api/replay endpoint ([b255534](https://github.com/rvanbaalen/roxyproxy/commit/b255534ac9d25001304ee783d022c1d0f2feb4a6))
+* add replay module for resending HTTP requests ([35d56ab](https://github.com/rvanbaalen/roxyproxy/commit/35d56ab0b93589031930a7c849b62b2fbb0c08fd))
+* add ReplayRequest and ReplayResponse types ([1b81fb1](https://github.com/rvanbaalen/roxyproxy/commit/1b81fb1e94abc7782463208d7907a2d805e8fd06))
+* add replayRequest API client function ([38c4434](https://github.com/rvanbaalen/roxyproxy/commit/38c443485670240c7229093560e3e76db0113480))
+* add roxyproxy replay CLI command ([d6b6dd9](https://github.com/rvanbaalen/roxyproxy/commit/d6b6dd962ec821cadeae96badb286b9f6e21c7fa))
+* **ui:** make web interface mobile-friendly ([62a7a52](https://github.com/rvanbaalen/roxyproxy/commit/62a7a526b31144001494bdd9b6d692ac2536f21b))
+
 ## [0.1.5](https://github.com/rvanbaalen/roxyproxy/compare/roxyproxy-v0.1.4...roxyproxy-v0.1.5) (2026-03-18)
 
 
