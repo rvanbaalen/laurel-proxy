@@ -1,6 +1,9 @@
 import { execFile } from 'node:child_process';
+import fs from 'node:fs';
 import http from 'node:http';
 import net from 'node:net';
+import os from 'node:os';
+import path from 'node:path';
 
 function run(cmd: string, args: string[]): Promise<{ code: number; stdout: string }> {
   return new Promise((resolve) => {
@@ -10,7 +13,7 @@ function run(cmd: string, args: string[]): Promise<{ code: number; stdout: strin
   });
 }
 
-interface PortProcess {
+export interface PortProcess {
   pid: number;
   isRoxyProxy: boolean;
 }
@@ -18,7 +21,7 @@ interface PortProcess {
 /**
  * Find which process is using a port. Returns null if detection fails.
  */
-async function getProcessOnPort(port: number): Promise<PortProcess | null> {
+export async function getProcessOnPort(port: number): Promise<PortProcess | null> {
   const result = await run('lsof', ['-ti', `:${port}`]);
   if (result.code !== 0 || !result.stdout) return null;
 
@@ -70,6 +73,87 @@ export interface ListenResult {
   port: number;
   killedPrevious: boolean;
 }
+
+// ── Process detection & cleanup ──
+
+export interface ExistingInstance {
+  pid: number;
+  ports: number[];
+}
+
+/**
+ * Find running RoxyProxy instances via PID file and port scanning.
+ */
+export async function findExistingInstances(proxyPort: number, uiPort: number): Promise<ExistingInstance[]> {
+  const instances = new Map<number, ExistingInstance>();
+
+  // Check PID file
+  const pidPath = path.join(os.homedir(), '.roxyproxy', 'pid');
+  try {
+    const pid = parseInt(fs.readFileSync(pidPath, 'utf-8').trim(), 10);
+    if (!isNaN(pid) && pid !== process.pid) {
+      try {
+        process.kill(pid, 0); // check if alive
+        instances.set(pid, { pid, ports: [] });
+      } catch {
+        // Stale PID file — clean it up
+        try { fs.unlinkSync(pidPath); } catch {}
+      }
+    }
+  } catch {}
+
+  // Check configured ports
+  for (const port of new Set([proxyPort, uiPort])) {
+    const proc = await getProcessOnPort(port);
+    if (proc?.isRoxyProxy && proc.pid !== process.pid) {
+      if (instances.has(proc.pid)) {
+        instances.get(proc.pid)!.ports.push(port);
+      } else {
+        instances.set(proc.pid, { pid: proc.pid, ports: [port] });
+      }
+    }
+  }
+
+  return Array.from(instances.values());
+}
+
+/**
+ * Kill an existing RoxyProxy instance. Tries API shutdown first, then SIGTERM.
+ */
+export async function killInstance(instance: ExistingInstance): Promise<boolean> {
+  // Try graceful API shutdown on known ports
+  for (const port of instance.ports) {
+    if (await shutdownViaApi(port)) {
+      if (await waitForProcessExit(instance.pid)) return true;
+    }
+  }
+
+  // Fallback: SIGTERM
+  try {
+    process.kill(instance.pid, 'SIGTERM');
+    if (await waitForProcessExit(instance.pid)) return true;
+  } catch {}
+
+  return false;
+}
+
+function waitForProcessExit(pid: number, timeoutMs = 3000): Promise<boolean> {
+  const start = Date.now();
+  return new Promise((resolve) => {
+    const check = () => {
+      try {
+        process.kill(pid, 0);
+        if (Date.now() - start > timeoutMs) { resolve(false); return; }
+        setTimeout(check, 200);
+      } catch {
+        resolve(true);
+      }
+    };
+    check();
+  });
+}
+
+// ── Port binding ──
 
 /**
  * Try to listen on a port. If EADDRINUSE:

@@ -7,6 +7,7 @@ import os from 'node:os';
 import fs from 'node:fs';
 import { loadConfig } from '../server/config.js';
 import { RoxyProxyServer } from '../server/index.js';
+import { findExistingInstances, killInstance, type ExistingInstance } from '../server/port-utils.js';
 import { Database } from '../storage/db.js';
 import { enableSystemProxy, disableSystemProxy, installCaCert, uninstallCaCert, checkCaStatus, checkSystemProxyStatus } from './system-proxy.js';
 import type { CaStatus } from './system-proxy.js';
@@ -149,7 +150,7 @@ function Header({ running }: { running: boolean }) {
 
 // ── Sub-screens ──
 
-type Screen = 'menu' | 'status' | 'requests' | 'request-detail' | 'working';
+type Screen = 'menu' | 'status' | 'requests' | 'request-detail' | 'working' | 'confirm-kill';
 
 function StatusView({ onBack, port }: { onBack: () => void; port: number }) {
   const [status, setStatus] = useState<Record<string, unknown> | null>(null);
@@ -314,6 +315,31 @@ function RequestDetailView({ requestId, onBack }: { requestId: string; onBack: (
   );
 }
 
+function ConfirmKillView({ instances, onConfirm, onCancel }: { instances: ExistingInstance[]; onConfirm: () => void; onCancel: () => void }) {
+  useInput((input) => {
+    if (input.toLowerCase() === 'y') onConfirm();
+    else if (input.toLowerCase() === 'n' || input === '\x1B') onCancel();
+  });
+
+  return (
+    <Box flexDirection="column">
+      <Box marginBottom={1}>
+        <Text color="yellow">  ! Existing RoxyProxy instance{instances.length > 1 ? 's' : ''} detected:</Text>
+      </Box>
+      {instances.map((inst) => (
+        <Box key={inst.pid}>
+          <Text>    PID {inst.pid}</Text>
+          {inst.ports.length > 0 && <Text dimColor>  (port{inst.ports.length > 1 ? 's' : ''} {inst.ports.join(', ')})</Text>}
+        </Box>
+      ))}
+      <Box marginTop={1}>
+        <Text>  Kill existing instance{instances.length > 1 ? 's' : ''} and start? </Text>
+        <Text color="cyan" bold>Y</Text><Text>/</Text><Text bold>N</Text>
+      </Box>
+    </Box>
+  );
+}
+
 function formatBodyStr(body: Buffer | null, contentType: string | null): string {
   if (!body) return '(empty)';
   const str = Buffer.isBuffer(body) ? body.toString('utf-8') : String(body);
@@ -336,6 +362,7 @@ function App() {
   const [cursor, setCursor] = useState(0);
   const [caStatus, setCaStatus] = useState<CaStatus>({ exists: false, trusted: false, certPath: '' });
   const [systemProxyEnabled, setSystemProxyEnabled] = useState(false);
+  const [pendingInstances, setPendingInstances] = useState<ExistingInstance[]>([]);
 
   // Check status on startup
   useEffect(() => {
@@ -368,6 +395,46 @@ function App() {
     if (key.downArrow) setCursor(c => Math.min(selectableItems.length - 1, c + 1));
   });
 
+  const doStartProxy = async () => {
+    setScreen('working');
+    setWorkingLabel('Starting proxy...');
+    try {
+      const config = loadConfig();
+      const pidPath = path.join(os.homedir(), '.roxyproxy', 'pid');
+      fs.mkdirSync(path.dirname(pidPath), { recursive: true });
+      fs.writeFileSync(pidPath, process.pid.toString());
+      const s = new RoxyProxyServer(config);
+      const ports = await s.start();
+      setServer(s);
+      setUiPort(ports.uiPort);
+      setMessage(`Proxy on :${ports.proxyPort}, UI on :${ports.uiPort}`);
+    } catch (e) {
+      setMessage(`Failed: ${(e as Error).message}`);
+    }
+    setScreen('menu');
+  };
+
+  const handleConfirmKill = async () => {
+    setScreen('working');
+    setWorkingLabel('Stopping existing instance...');
+    for (const inst of pendingInstances) {
+      const killed = await killInstance(inst);
+      if (!killed) {
+        setMessage(`Failed to stop instance PID ${inst.pid}`);
+        setScreen('menu');
+        return;
+      }
+    }
+    setPendingInstances([]);
+    await doStartProxy();
+  };
+
+  const handleCancelKill = () => {
+    setPendingInstances([]);
+    setMessage('Start cancelled.');
+    setScreen('menu');
+  };
+
   const handleSelect = async (value: string) => {
     setMessage('');
     switch (value) {
@@ -394,22 +461,17 @@ function App() {
           }
           setScreen('menu');
         } else {
+          // First start — check for existing instances
           setScreen('working');
-          setWorkingLabel('Starting proxy...');
-          try {
-            const config = loadConfig();
-            const pidPath = path.join(os.homedir(), '.roxyproxy', 'pid');
-            fs.mkdirSync(path.dirname(pidPath), { recursive: true });
-            fs.writeFileSync(pidPath, process.pid.toString());
-            const s = new RoxyProxyServer(config);
-            const ports = await s.start();
-            setServer(s);
-            setUiPort(ports.uiPort);
-            setMessage(`Proxy on :${ports.proxyPort}, UI on :${ports.uiPort}`);
-          } catch (e) {
-            setMessage(`Failed: ${(e as Error).message}`);
+          setWorkingLabel('Checking for existing instances...');
+          const config = loadConfig();
+          const existing = await findExistingInstances(config.proxyPort, config.uiPort);
+          if (existing.length > 0) {
+            setPendingInstances(existing);
+            setScreen('confirm-kill');
+          } else {
+            await doStartProxy();
           }
-          setScreen('menu');
         }
         break;
       }
@@ -445,23 +507,17 @@ function App() {
       }
       case 'open-ui': {
         if (!server) {
+          // Check for existing instances before starting
           setScreen('working');
-          setWorkingLabel('Starting proxy...');
-          try {
-            const config = loadConfig();
-            const pidPath = path.join(os.homedir(), '.roxyproxy', 'pid');
-            fs.mkdirSync(path.dirname(pidPath), { recursive: true });
-            fs.writeFileSync(pidPath, process.pid.toString());
-            const s = new RoxyProxyServer(config);
-            const ports = await s.start();
-            setServer(s);
-            setUiPort(ports.uiPort);
-            setMessage(`Proxy on :${ports.proxyPort}, UI on :${ports.uiPort}`);
-          } catch (e) {
-            setMessage(`Failed to start proxy: ${(e as Error).message}`);
-            setScreen('menu');
+          setWorkingLabel('Checking for existing instances...');
+          const config = loadConfig();
+          const existing = await findExistingInstances(config.proxyPort, config.uiPort);
+          if (existing.length > 0) {
+            setPendingInstances(existing);
+            setScreen('confirm-kill');
             break;
           }
+          await doStartProxy();
         }
         const uiUrl = `http://127.0.0.1:${uiPort}`;
         const cmd = os.platform() === 'darwin' ? 'open' : os.platform() === 'win32' ? 'start' : 'xdg-open';
@@ -524,6 +580,9 @@ function App() {
   }
   if (screen === 'request-detail' && selectedRequestId) {
     return (<Box flexDirection="column" padding={1}><Header running={proxyRunning} /><RequestDetailView requestId={selectedRequestId} onBack={() => setScreen('requests')} /></Box>);
+  }
+  if (screen === 'confirm-kill') {
+    return (<Box flexDirection="column" padding={1}><Header running={proxyRunning} /><ConfirmKillView instances={pendingInstances} onConfirm={handleConfirmKill} onCancel={handleCancelKill} /></Box>);
   }
   if (screen === 'working') {
     return (<Box flexDirection="column" padding={1}><Header running={proxyRunning} /><Text color="cyan">  {workingLabel}</Text></Box>);
