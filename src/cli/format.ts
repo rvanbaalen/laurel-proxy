@@ -48,11 +48,89 @@ const statusColor = (status: number | null): string => {
   return pc.red(s);
 };
 
+// ── Agent format helpers ──
+
+function isTextContentType(contentType: string | null): boolean {
+  if (!contentType) return true;
+  return /text\/|application\/json|application\/xml|application\/javascript|application\/x-www-form-urlencoded/.test(contentType);
+}
+
+function decodeBody(body: Buffer | null, contentType: string | null, size: number): string | null {
+  if (!body) return null;
+  if (!isTextContentType(contentType)) {
+    return `[binary response, ${formatBytes(size)}, content-type: ${contentType}]`;
+  }
+  return Buffer.isBuffer(body) ? body.toString('utf-8') : String(body);
+}
+
+function parseHeadersJson(headersJson: string | null): Record<string, unknown> | null {
+  if (!headersJson) return null;
+  try { return JSON.parse(headersJson); } catch { return null; }
+}
+
+function agentSummary(r: RequestRecord): string {
+  const status = r.status ?? '?';
+  const duration = r.duration ? ` (took ${r.duration}ms)` : '';
+  return `${r.method} ${r.url} → ${status}${duration}`;
+}
+
+function toAgentRecord(r: RequestRecord) {
+  return {
+    summary: agentSummary(r),
+    request: {
+      method: r.method,
+      url: r.url,
+      host: r.host,
+      headers: parseHeadersJson(r.request_headers),
+      body_decoded: decodeBody(r.request_body, r.content_type, r.request_size),
+      body_truncated: r.truncated === 1,
+    },
+    response: {
+      status: r.status,
+      status_text: r.status ? httpStatusText(r.status) : null,
+      headers: parseHeadersJson(r.response_headers),
+      body_decoded: decodeBody(r.response_body, r.content_type, r.response_size),
+      body_truncated: r.truncated === 1,
+    },
+    timing: {
+      duration_ms: r.duration,
+      timestamp_iso: new Date(r.timestamp).toISOString(),
+    },
+    context: {
+      is_error: r.status != null && r.status >= 400,
+      content_type: r.content_type,
+    },
+  };
+}
+
+function httpStatusText(status: number): string {
+  const texts: Record<number, string> = {
+    200: 'OK', 201: 'Created', 204: 'No Content',
+    301: 'Moved Permanently', 302: 'Found', 304: 'Not Modified',
+    400: 'Bad Request', 401: 'Unauthorized', 403: 'Forbidden',
+    404: 'Not Found', 405: 'Method Not Allowed', 409: 'Conflict',
+    422: 'Unprocessable Entity', 429: 'Too Many Requests',
+    500: 'Internal Server Error', 502: 'Bad Gateway',
+    503: 'Service Unavailable', 504: 'Gateway Timeout',
+  };
+  return texts[status] ?? '';
+}
+
 // ── Table formatters ──
 
 export function formatRequests(result: PaginatedResponse<RequestRecord>, format: string): string {
   if (format === 'json') {
     return JSON.stringify(result, null, 2);
+  }
+
+  if (format === 'agent') {
+    const agentResult = {
+      data: result.data.map(toAgentRecord),
+      total: result.total,
+      limit: result.limit,
+      offset: result.offset,
+    };
+    return JSON.stringify(agentResult, null, 2);
   }
 
   if (result.data.length === 0) {
@@ -90,6 +168,10 @@ export function formatRequests(result: PaginatedResponse<RequestRecord>, format:
 export function formatRequest(record: RequestRecord, format: string): string {
   if (format === 'json') {
     return JSON.stringify(record, null, 2);
+  }
+
+  if (format === 'agent') {
+    return JSON.stringify(toAgentRecord(record), null, 2);
   }
 
   const lines: string[] = [
@@ -154,6 +236,16 @@ export function formatTailLine(r: RequestRecord, format: string): string {
       path: r.path,
       url: r.url,
       duration: r.duration,
+    });
+  }
+
+  if (format === 'agent') {
+    return JSON.stringify({
+      summary: agentSummary(r),
+      context: {
+        is_error: r.status != null && r.status >= 400,
+        content_type: r.content_type,
+      },
     });
   }
 
