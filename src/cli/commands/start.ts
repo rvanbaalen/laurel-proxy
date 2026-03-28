@@ -81,9 +81,14 @@ export function registerStart(program: Command): void {
 
       const pidCleanup = () => { try { fs.unlinkSync(pidPath); } catch {} };
 
+      let systemProxyEnabledAtStart = false;
+
       const shutdown = async () => {
         console.log(`\n  ${pc.yellow('⏻')} ${pc.dim('Shutting down...')}`);
         if (process.stdin.isRaw) process.stdin.setRawMode(false);
+        if (systemProxyEnabledAtStart || (await checkSystemProxyStatus())) {
+          await disableSystemProxy();
+        }
         await server.stop();
         pidCleanup();
         process.exit(0);
@@ -140,11 +145,11 @@ export function registerStart(program: Command): void {
             if (systemProxyEnabled) {
               const result = await disableSystemProxy();
               msg = `${result.ok ? pc.green('✓') : pc.red('✗')} ${result.message}`;
-              if (result.ok) systemProxyEnabled = false;
+              if (result.ok) { systemProxyEnabled = false; systemProxyEnabledAtStart = false; }
             } else {
               const result = await enableSystemProxy();
               msg = `${result.ok ? pc.green('✓') : pc.red('✗')} ${result.message}`;
-              if (result.ok) systemProxyEnabled = true;
+              if (result.ok) { systemProxyEnabled = true; systemProxyEnabledAtStart = true; }
             }
             printControls(msg);
           }
