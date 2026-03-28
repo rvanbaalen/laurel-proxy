@@ -64,7 +64,7 @@ export function Controls({ onClear, statusEvent, activeView, onViewChange, repea
     <div className="flex items-center gap-3 px-4 py-2.5 border-b border-border-subtle bg-bg-primary h-12">
       {/* Logo */}
       <h1 className="font-mono text-sm font-bold text-text-primary tracking-tight whitespace-nowrap">
-        Roxy<span className="text-accent">Proxy</span>
+        Laurel<span className="text-accent">Proxy</span>
       </h1>
 
       {/* Status pill */}

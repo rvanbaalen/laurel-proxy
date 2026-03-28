@@ -104,15 +104,15 @@ echo ""
 
 # Emulated CLI banner
 sleep 0.5
-printf "${CYAN}  ___                ___                    ${RESET}\n"
+printf "${CYAN}  _                      _   ___                  ${RESET}\n"
 sleep 0.05
-printf "${CYAN} | _ \\___ __ ___  _ | _ \\_ _ _____ ___  _  ${RESET}\n"
+printf "${CYAN} | |   __ _ _  _ _ _ ___| | | _ \\_ _ _____ ___  _ ${RESET}\n"
 sleep 0.05
-printf "${CYAN} |   / _ \\\\\\ \\ / || || ___/ '_/ _ \\ \\ /| || |${RESET}\n"
+printf "${CYAN} | |__/ _\` | || | '_/ -_) | |  _/ '_/ _ \\ \\ / || |${RESET}\n"
 sleep 0.05
-printf "${CYAN} |_|_\\___//_\\_\\\\\\_, ||_|  |_| \\___/_\\_\\ \\_, |${RESET}\n"
+printf "${CYAN} |____\\__,_|\\_,_|_| \\___|_| |_| |_| \\___/_\\_\\\\_, |${RESET}\n"
 sleep 0.05
-printf "${CYAN}                |__/                   |__/ ${RESET}\n"
+printf "${CYAN}                                             |__/ ${RESET}\n"
 echo ""
 sleep 0.6
 

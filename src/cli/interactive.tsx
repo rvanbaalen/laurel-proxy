@@ -135,11 +135,11 @@ function GroupedMenu({ menu, cursor, onSelect }: { menu: MenuEntry[]; cursor: nu
 function Header({ running }: { running: boolean }) {
   return (
     <Box flexDirection="column" marginBottom={1}>
-      <Text color="cyan">{'  ___                ___                    '}</Text>
-      <Text color="cyan">{' | _ \\___ __ ___  _ | _ \\_ _ _____ ___  _  '}</Text>
-      <Text color="cyan">{' |   / _ \\\\ \\ / || || ___/ \'_/ _ \\ \\ /| || |'}</Text>
-      <Text color="cyan">{' |_|_\\___//_\\_\\\\_, ||_|  |_| \\___/_\\_\\ \\_, |'}</Text>
-      <Text color="cyan">{'                |__/                   |__/ '}</Text>
+      <Text color="cyan">{'  _                      _   ___                  '}</Text>
+      <Text color="cyan">{' | |   __ _ _  _ _ _ ___| | | _ \\_ _ _____ ___  _ '}</Text>
+      <Text color="cyan">{' | |__/ _` | || | \'_/ -_) | |  _/ \'_/ _ \\ \\ / || |'}</Text>
+      <Text color="cyan">{' |____\\__,_|\\_,_|_| \\___|_| |_| |_| \\___/_\\_\\\\_, |'}</Text>
+      <Text color="cyan">{'                                             |__/ '}</Text>
       <Box marginTop={0}>
         <Text dimColor>  HTTP/HTTPS intercepting proxy</Text>
         {running && <Text color="green">  ● running</Text>}
@@ -386,8 +386,12 @@ function App() {
 
   useInput((input, key) => {
     if ((key.ctrl && input === 'c') || (screen === 'menu' && input === 'q')) {
-      if (server) server.stop().then(() => exit());
-      else exit();
+      const cleanup = async () => {
+        if (systemProxyEnabled) await disableSystemProxy();
+        if (server) await server.stop();
+        exit();
+      };
+      cleanup();
       return;
     }
     if (screen !== 'menu') return;
@@ -565,6 +569,7 @@ function App() {
         break;
       }
       case 'quit':
+        if (systemProxyEnabled) await disableSystemProxy();
         if (server) await server.stop();
         exit();
         break;
