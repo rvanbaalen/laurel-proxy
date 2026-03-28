@@ -8,6 +8,7 @@ import type { RequestFilter, RequestRecord } from '../shared/types.js';
 import type { CertificateAuthority } from './ssl.js';
 import type { ReplayRequest } from '../shared/types.js';
 import { replay } from './replay.js';
+import { enableSystemProxy, disableSystemProxy, checkSystemProxyStatus } from '../cli/system-proxy.js';
 
 function serializeRecord(r: RequestRecord): Record<string, unknown> {
   return {
@@ -115,6 +116,21 @@ export function createApiRouter(
     } catch (err) {
       res.status(500).json({ error: (err as Error).message });
     }
+  });
+
+  router.get('/system-proxy', async (_req: Request, res: Response) => {
+    const enabled = await checkSystemProxyStatus();
+    res.json({ enabled });
+  });
+
+  router.post('/system-proxy/enable', async (_req: Request, res: Response) => {
+    const result = await enableSystemProxy(String(proxy.getProxyPort()));
+    res.json(result);
+  });
+
+  router.post('/system-proxy/disable', async (_req: Request, res: Response) => {
+    const result = await disableSystemProxy();
+    res.json(result);
   });
 
   router.post('/replay', async (req: Request, res: Response) => {
