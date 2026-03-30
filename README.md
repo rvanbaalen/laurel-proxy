@@ -10,7 +10,7 @@
 </p>
 
 <p align="center">
-  <a href="https://www.npmjs.com/package/@rvanbaalen/laurel-proxy"><img src="https://img.shields.io/npm/v/@rvanbaalen/laurel-proxy" alt="npm version" /></a>
+  <a href="https://www.npmjs.com/package/laurel-proxy"><img src="https://img.shields.io/npm/v/laurel-proxy" alt="npm version" /></a>
   <img src="https://img.shields.io/badge/license-MIT-green" alt="MIT License" />
   <img src="https://img.shields.io/badge/platform-macOS%20%7C%20Linux-blue" alt="Platform" />
 </p>
@@ -25,7 +25,7 @@
 
 ```bash
 # Install and start capturing traffic in 10 seconds
-npx @rvanbaalen/laurel-proxy requests --tail
+npx laurel-proxy requests --tail
 ```
 
 ## Why Laurel Proxy?
@@ -69,7 +69,7 @@ For HTTPS: `laurel-proxy trust-ca` then traffic flows through automatically.
 ## Claude Code Plugin
 
 ```
-/plugin marketplace add rvanbaalen/laurel-proxy
+/plugin marketplace add rvanbaalen/laurelproxy
 ```
 
 After installation, just tell Claude what you need. It knows every command, filter, and API endpoint.
@@ -77,8 +77,8 @@ After installation, just tell Claude what you need. It knows every command, filt
 ## Installation
 
 ```bash
-npx @rvanbaalen/laurel-proxy          # Run without installing
-npm install -g @rvanbaalen/laurel-proxy  # Or install globally
+npx laurel-proxy          # Run without installing
+npm install -g laurel-proxy  # Or install globally
 ```
 
 ## Platform
