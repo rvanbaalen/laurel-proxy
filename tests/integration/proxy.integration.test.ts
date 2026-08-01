@@ -67,6 +67,39 @@ describe('Laurel Proxy Integration', () => {
     const status = JSON.parse(res.body);
     expect(status.running).toBe(true);
   });
+
+  it('relays a chunked response without buffering it whole', async () => {
+    const upstream = http.createServer((_req, res) => {
+      res.writeHead(200, { 'Content-Type': 'text/plain' });
+      res.write('first-');
+      res.write('second-');
+      res.end('third');
+    });
+    await new Promise<void>((r) => upstream.listen(0, r));
+    const upstreamPort = (upstream.address() as net.AddressInfo).port;
+
+    const res = await proxiedGet(`http://127.0.0.1:${upstreamPort}/chunked`);
+    expect(res.body).toBe('first-second-third');
+    // No transfer-encoding leaks through; we re-frame the response ourselves.
+    expect(res.headers['transfer-encoding']).toBeUndefined();
+
+    upstream.close();
+  });
+
+  async function proxiedGet(url: string): Promise<{ body: string; headers: http.IncomingHttpHeaders }> {
+    return new Promise((resolve, reject) => {
+      const req = http.request(
+        { host: '127.0.0.1', port: proxyPort, path: url, method: 'GET' },
+        (res) => {
+          let body = '';
+          res.on('data', (chunk) => { body += chunk; });
+          res.on('end', () => resolve({ body, headers: res.headers }));
+        },
+      );
+      req.on('error', reject);
+      req.end();
+    });
+  }
 });
 
 function httpGet(url: string, proxyPort: number): Promise<{ status: number; body: string }> {

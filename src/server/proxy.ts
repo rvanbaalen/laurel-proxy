@@ -1,14 +1,13 @@
 import http from 'node:http';
-import https from 'node:https';
 import net from 'node:net';
 import tls from 'node:tls';
-import { randomUUID } from 'node:crypto';
-import { URL } from 'node:url';
 import type { Database } from '../storage/db.js';
 import type { CertificateAuthority } from './ssl.js';
 import type { EventManager } from './events.js';
 import type { Config, RequestRecord } from '../shared/types.js';
 import { listenWithRetry } from './port-utils.js';
+import { handleExchange, resolveHttpTarget, resolveMitmTarget } from './exchange.js';
+import type { ExchangeDeps } from './exchange.js';
 
 export class ProxyServer {
   private server: http.Server | null = null;
@@ -70,103 +69,24 @@ export class ProxyServer {
     this.db.insertBatch(batch);
   }
 
-  /**
-   * Strip accept-encoding from outgoing headers so the upstream server
-   * sends an uncompressed response. This avoids all decompression edge cases.
-   */
-  private stripEncoding(headers: Record<string, string | string[] | undefined>): void {
-    delete headers['accept-encoding'];
+  private get exchangeDeps(): ExchangeDeps {
+    return {
+      config: this.config,
+      onRecord: (record) => {
+        this.writeQueue.push(record);
+        this.events.push(record);
+      },
+    };
   }
 
   private handleRequest(clientReq: http.IncomingMessage, clientRes: http.ServerResponse): void {
-    const startTime = Date.now();
-    const id = randomUUID();
-
-    const url = clientReq.url || '/';
-    let parsed: URL;
-    try {
-      parsed = new URL(url);
-    } catch {
+    const target = resolveHttpTarget(clientReq.url || '/');
+    if (!target) {
       clientRes.writeHead(400);
       clientRes.end('Bad Request');
       return;
     }
-
-    const requestBodyChunks: Buffer[] = [];
-
-    clientReq.on('data', (chunk: Buffer) => {
-      requestBodyChunks.push(chunk);
-    });
-
-    clientReq.on('end', () => {
-      const requestBody = Buffer.concat(requestBodyChunks);
-
-      const headers = { ...clientReq.headers };
-      delete (headers as Record<string, string>)['proxy-connection'];
-      this.stripEncoding(headers);
-
-      const options: http.RequestOptions = {
-        hostname: parsed.hostname,
-        port: parsed.port || 80,
-        path: parsed.pathname + parsed.search,
-        method: clientReq.method,
-        headers,
-      };
-
-      const proxyReq = http.request(options, (proxyRes) => {
-        const responseBodyChunks: Buffer[] = [];
-
-        proxyRes.on('data', (chunk: Buffer) => {
-          responseBodyChunks.push(chunk);
-        });
-
-        proxyRes.on('end', () => {
-          const responseBody = Buffer.concat(responseBodyChunks);
-
-          const resHeaders = { ...proxyRes.headers };
-          delete resHeaders['transfer-encoding'];
-          resHeaders['content-length'] = responseBody.length.toString();
-          clientRes.writeHead(proxyRes.statusCode || 500, resHeaders);
-          clientRes.end(responseBody);
-
-          const truncated = requestBody.length > this.config.maxBodySize || responseBody.length > this.config.maxBodySize;
-          const contentType = (proxyRes.headers['content-type'] || '').split(';')[0].trim() || null;
-
-          const record: RequestRecord = {
-            id,
-            timestamp: startTime,
-            method: clientReq.method || 'GET',
-            url,
-            host: parsed.hostname || '',
-            path: parsed.pathname || '/',
-            protocol: 'http',
-            request_headers: JSON.stringify(clientReq.headers),
-            request_body: requestBody.length > 0 ? requestBody.slice(0, this.config.maxBodySize) : null,
-            request_size: requestBody.length,
-            status: proxyRes.statusCode || 0,
-            response_headers: JSON.stringify(proxyRes.headers),
-            response_body: responseBody.length > 0 ? responseBody.slice(0, this.config.maxBodySize) : null,
-            response_size: responseBody.length,
-            duration: Date.now() - startTime,
-            content_type: contentType,
-            truncated: truncated ? 1 : 0,
-          };
-
-          this.writeQueue.push(record);
-          this.events.push(record);
-        });
-      });
-
-      proxyReq.on('error', () => {
-        clientRes.writeHead(502);
-        clientRes.end('Bad Gateway');
-      });
-
-      if (requestBody.length > 0) {
-        proxyReq.write(requestBody);
-      }
-      proxyReq.end();
-    });
+    void handleExchange(clientReq, clientRes, target, this.exchangeDeps);
   }
 
   private handleConnect(req: http.IncomingMessage, clientSocket: net.Socket, _head: Buffer): void {
@@ -190,95 +110,13 @@ export class ProxyServer {
       });
 
       const virtualServer = http.createServer((clientReq, clientRes) => {
-        this.handleMitmRequest(hostname, port, clientReq, clientRes);
+        const target = resolveMitmTarget(hostname, port, clientReq.url || '/');
+        void handleExchange(clientReq, clientRes, target, this.exchangeDeps);
       });
 
       virtualServer.emit('connection', tlsSocket);
     } catch {
       clientSocket.end();
     }
-  }
-
-  private handleMitmRequest(hostname: string, port: number, clientReq: http.IncomingMessage, clientRes: http.ServerResponse): void {
-    const startTime = Date.now();
-    const id = randomUUID();
-    const urlPath = clientReq.url || '/';
-    const fullUrl = `https://${hostname}${urlPath}`;
-
-    const requestBodyChunks: Buffer[] = [];
-
-    clientReq.on('data', (chunk: Buffer) => {
-      requestBodyChunks.push(chunk);
-    });
-
-    clientReq.on('end', () => {
-      const requestBody = Buffer.concat(requestBodyChunks);
-
-      const headers = { ...clientReq.headers, host: hostname };
-      this.stripEncoding(headers);
-
-      const options: https.RequestOptions = {
-        hostname,
-        port,
-        path: urlPath,
-        method: clientReq.method,
-        headers,
-        rejectUnauthorized: false,
-      };
-
-      const proxyReq = https.request(options, (proxyRes) => {
-        const responseBodyChunks: Buffer[] = [];
-
-        proxyRes.on('data', (chunk: Buffer) => {
-          responseBodyChunks.push(chunk);
-        });
-
-        proxyRes.on('end', () => {
-          const responseBody = Buffer.concat(responseBodyChunks);
-
-          const resHeaders = { ...proxyRes.headers };
-          delete resHeaders['transfer-encoding'];
-          resHeaders['content-length'] = responseBody.length.toString();
-          clientRes.writeHead(proxyRes.statusCode || 500, resHeaders);
-          clientRes.end(responseBody);
-
-          const truncated = requestBody.length > this.config.maxBodySize || responseBody.length > this.config.maxBodySize;
-          const contentType = (proxyRes.headers['content-type'] || '').split(';')[0].trim() || null;
-
-          const record: RequestRecord = {
-            id,
-            timestamp: startTime,
-            method: clientReq.method || 'GET',
-            url: fullUrl,
-            host: hostname,
-            path: urlPath,
-            protocol: 'https',
-            request_headers: JSON.stringify(clientReq.headers),
-            request_body: requestBody.length > 0 ? requestBody.slice(0, this.config.maxBodySize) : null,
-            request_size: requestBody.length,
-            status: proxyRes.statusCode || 0,
-            response_headers: JSON.stringify(proxyRes.headers),
-            response_body: responseBody.length > 0 ? responseBody.slice(0, this.config.maxBodySize) : null,
-            response_size: responseBody.length,
-            duration: Date.now() - startTime,
-            content_type: contentType,
-            truncated: truncated ? 1 : 0,
-          };
-
-          this.writeQueue.push(record);
-          this.events.push(record);
-        });
-      });
-
-      proxyReq.on('error', () => {
-        clientRes.writeHead(502);
-        clientRes.end('Bad Gateway');
-      });
-
-      if (requestBody.length > 0) {
-        proxyReq.write(requestBody);
-      }
-      proxyReq.end();
-    });
   }
 }
