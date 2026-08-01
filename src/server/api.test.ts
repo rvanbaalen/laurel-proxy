@@ -256,6 +256,40 @@ describe('REST API', () => {
     expect(fs.existsSync(configPath)).toBe(false);
   });
 
+  it('a preset with an explicit null applies the preset, not the explicit-merge branch', async () => {
+    // `preset: null` must be treated as "no preset", not as an attempted
+    // (and doomed) lookup of the literal preset "null".
+    const res = await httpReq(port, '/api/throttle', 'PUT', {
+      preset: null, enabled: true, downKbps: 500, upKbps: 250, latencyMs: 50,
+    });
+    expect(res.status).toBe(200);
+    const body = JSON.parse(res.body);
+    expect(body.settings.downKbps).toBe(500);
+  });
+
+  it('PUT /api/throttle returns 5xx and leaves live settings unchanged when persistence fails', async () => {
+    const before = throttler.getSettings();
+
+    // Point the config path at a location whose parent path segment already
+    // exists as a regular file. fs.mkdirSync(dirname, { recursive: true })
+    // inside saveThrottleSettings then reliably throws (EEXIST on macOS,
+    // ENOTDIR on Linux) — no root privileges or chmod tricks required, and
+    // it behaves the same on both platforms.
+    const blocker = path.join(configDir, 'not-a-directory');
+    fs.writeFileSync(blocker, 'x');
+    process.env.LAUREL_PROXY_CONFIG = path.join(blocker, 'config.json');
+
+    const res = await httpReq(port, '/api/throttle', 'PUT', { preset: '3g' });
+
+    expect(res.status).toBeGreaterThanOrEqual(500);
+    expect(res.status).toBeLessThan(600);
+    const body = JSON.parse(res.body);
+    expect(body.error).toMatch(/persist/i);
+    // This is the assertion that proves the ordering: the live throttler
+    // must not have been mutated when the persist step failed.
+    expect(throttler.getSettings()).toEqual(before);
+  });
+
   it('PUT /api/throttle persists settings to the redirected config file', async () => {
     const configPath = getConfigPath();
     expect(configPath.startsWith(configDir)).toBe(true);

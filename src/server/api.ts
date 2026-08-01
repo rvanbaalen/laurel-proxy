@@ -129,7 +129,7 @@ export function createApiRouter(
     const body = req.body as ThrottlePutBody;
     let settings: ThrottleSettings;
 
-    if (body.preset !== undefined) {
+    if (body.preset != null) {
       // A preset takes precedence over any explicit rate fields present in
       // the same body — it fully replaces the settings rather than merging.
       if (body.preset === 'off') {
@@ -167,9 +167,22 @@ export function createApiRouter(
     }
 
     // Nothing above mutates live state: a rejected request must leave both
-    // the running throttler and the persisted config untouched.
+    // the running throttler and the persisted config untouched. Persist
+    // first, then apply to the live throttler only once the write has
+    // actually succeeded — the config file is the durable record, and an
+    // in-memory update() can't fail, so this ordering is the only one that
+    // can't leave disk and memory disagreeing. A restart after a failed
+    // write must not silently revert the settings the caller just saw
+    // applied; failing the request loudly is better than that.
+    try {
+      saveThrottleSettings(settings);
+    } catch (err) {
+      res.status(500).json({
+        error: `Failed to persist throttle settings, change was not applied: ${(err as Error).message}`,
+      });
+      return;
+    }
     throttler.update(settings);
-    saveThrottleSettings(settings);
     res.json({ settings });
   });
 
