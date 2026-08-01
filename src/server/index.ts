@@ -66,7 +66,7 @@ export class LaurelProxyServer {
       },
     };
 
-    app.use('/api', createApiRouter(this.db, this.events, proxyControl, this.ca));
+    app.use('/api', createApiRouter(this.db, this.events, proxyControl, this.ca, this.throttleController));
 
     const uiDistPath = path.join(import.meta.dirname, '..', '..', 'dist', 'ui');
     app.use(express.static(uiDistPath));

@@ -9,6 +9,19 @@ import type { CertificateAuthority } from './ssl.js';
 import type { ReplayRequest } from '../shared/types.js';
 import { replay } from './replay.js';
 import { enableSystemProxy, disableSystemProxy, checkSystemProxyStatus } from '../cli/system-proxy.js';
+import type { Throttler } from './throttle.js';
+import { THROTTLE_PRESETS } from './throttle.js';
+import { saveThrottleSettings } from './config.js';
+import type { ThrottleSettings } from '../shared/types.js';
+
+/** Shape of a PUT /throttle body before it has been validated. */
+interface ThrottlePutBody {
+  preset?: unknown;
+  enabled?: unknown;
+  downKbps?: unknown;
+  upKbps?: unknown;
+  latencyMs?: unknown;
+}
 
 function serializeRecord(r: RequestRecord): Record<string, unknown> {
   return {
@@ -30,6 +43,7 @@ export function createApiRouter(
   events: EventManager,
   proxy: ProxyControl,
   ca?: CertificateAuthority,
+  throttler?: Throttler,
 ): Router {
   const router = Router();
 
@@ -96,6 +110,67 @@ export function createApiRouter(
     res.setHeader('Content-Type', 'application/x-x509-ca-cert');
     res.setHeader('Content-Disposition', 'attachment; filename="laurel-proxy-ca.crt"');
     fs.createReadStream(certPath).pipe(res);
+  });
+
+  router.get('/throttle', (_req: Request, res: Response) => {
+    if (!throttler) {
+      res.status(503).json({ error: 'Throttling not available' });
+      return;
+    }
+    res.json({ settings: throttler.getSettings(), presets: THROTTLE_PRESETS });
+  });
+
+  router.put('/throttle', (req: Request, res: Response) => {
+    if (!throttler) {
+      res.status(503).json({ error: 'Throttling not available' });
+      return;
+    }
+
+    const body = req.body as ThrottlePutBody;
+    let settings: ThrottleSettings;
+
+    if (body.preset !== undefined) {
+      // A preset takes precedence over any explicit rate fields present in
+      // the same body — it fully replaces the settings rather than merging.
+      if (body.preset === 'off') {
+        settings = { enabled: false, downKbps: 0, upKbps: 0, latencyMs: 0 };
+      } else {
+        const preset = typeof body.preset === 'string' ? THROTTLE_PRESETS[body.preset] : undefined;
+        if (!preset) {
+          res.status(400).json({
+            error: `Unknown preset "${String(body.preset)}". Available: ${Object.keys(THROTTLE_PRESETS).join(', ')}, off`,
+          });
+          return;
+        }
+        settings = { enabled: true, ...preset };
+      }
+    } else {
+      const current = throttler.getSettings();
+      const enabled = body.enabled ?? current.enabled;
+      if (typeof enabled !== 'boolean') {
+        res.status(400).json({ error: 'enabled must be a boolean' });
+        return;
+      }
+      settings = {
+        enabled,
+        downKbps: (body.downKbps ?? current.downKbps) as number,
+        upKbps: (body.upKbps ?? current.upKbps) as number,
+        latencyMs: (body.latencyMs ?? current.latencyMs) as number,
+      };
+    }
+
+    for (const key of ['downKbps', 'upKbps', 'latencyMs'] as const) {
+      if (!Number.isFinite(settings[key]) || settings[key] < 0) {
+        res.status(400).json({ error: `${key} must be a non-negative number` });
+        return;
+      }
+    }
+
+    // Nothing above mutates live state: a rejected request must leave both
+    // the running throttler and the persisted config untouched.
+    throttler.update(settings);
+    saveThrottleSettings(settings);
+    res.json({ settings });
   });
 
   router.post('/proxy/start', async (_req: Request, res: Response) => {
