@@ -19,10 +19,12 @@ lists five gaps where Charles wins. This project closes three of them:
 Explicitly out of scope: rewrite rules, Map Local, Map Remote, HTTPS interception
 changes (already works), and any desktop UI. Laurel stays CLI + web UI + REST API.
 
-When these land, the comparison page and its FAQ must be updated in the website
-repo — three rows, three bullets in "Where Charles Proxy is still better", two
-bullets in "Stick with Charles Proxy if...", and one FAQ answer currently assert
-these features are missing.
+The website repo is **out of scope for this project**. Its comparison page and FAQ
+currently assert these features are missing — three table rows, three bullets in
+"Where Charles Proxy is still better", two bullets in "Stick with Charles Proxy
+if...", and one FAQ answer. Once the implementation lands, that update is handled
+separately by generating an LLM prompt describing the shipped capabilities. Do not
+edit the website repo as part of this work.
 
 ## Architecture
 
