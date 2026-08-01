@@ -107,18 +107,12 @@ export async function handleExchange(
   }
 
   const resHeaders = { ...proxyRes.headers };
-  // We re-frame the response ourselves; upstream framing must not leak through.
+  // Strip upstream's framing header; we re-frame the response ourselves. If
+  // upstream gave us no content-length either (e.g. it used chunked
+  // encoding), Node will automatically re-introduce Transfer-Encoding:
+  // chunked as we stream — that's correct proxy behaviour (we genuinely are
+  // chunking) and keeps the connection reusable for keep-alive.
   delete resHeaders['transfer-encoding'];
-  if (resHeaders['content-length'] === undefined) {
-    // Upstream didn't tell us the length up front (e.g. it used chunked
-    // encoding), and we're streaming rather than buffering, so we can't
-    // compute a content-length ourselves either. Node would otherwise
-    // silently re-introduce Transfer-Encoding: chunked here; instead we
-    // frame the body by closing the connection once it ends, which is a
-    // valid HTTP/1.1 framing mechanism (RFC 7230 3.3.3).
-    clientRes.useChunkedEncodingByDefault = false;
-    resHeaders.connection = 'close';
-  }
   clientRes.writeHead(proxyRes.statusCode ?? 500, resHeaders);
 
   const captured: Buffer[] = [];
