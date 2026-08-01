@@ -1,5 +1,5 @@
 import pc from 'picocolors';
-import type { RequestRecord, PaginatedResponse, ReplayResponse } from '../shared/types.js';
+import type { RequestRecord, PaginatedResponse, ReplayResponse, ThrottleSettings, ThrottleProfile } from '../shared/types.js';
 
 // ── Shared column widths ──
 
@@ -398,4 +398,40 @@ export function formatDiff(original: RequestRecord, replayResponse: ReplayRespon
   lines.push('');
 
   return lines.join('\n');
+}
+
+// ── Throttle settings formatter ──
+
+export function formatThrottleSettings(
+  settings: ThrottleSettings,
+  presets: Record<string, ThrottleProfile>,
+  format: string,
+): string {
+  if (format === 'json') {
+    return JSON.stringify({ settings, presets }, null, 2);
+  }
+
+  const presetNames = Object.keys(presets).join(', ');
+
+  if (!settings.enabled) {
+    return [
+      '',
+      `  ${pc.dim('Throttling')}  disabled`,
+      '',
+      `  ${pc.dim('Presets:')} ${presetNames}`,
+      `  Enable with: ${pc.cyan('laurel-proxy throttle <preset>')}`,
+      '',
+    ].join('\n');
+  }
+
+  return [
+    '',
+    `  ${pc.dim('Throttling')}  ${pc.green('enabled')}`,
+    `  ${pc.dim('Download')}    ${settings.downKbps} kbps`,
+    `  ${pc.dim('Upload')}      ${settings.upKbps} kbps`,
+    `  ${pc.dim('Latency')}     ${settings.latencyMs} ms`,
+    '',
+    `  Disable with: ${pc.cyan('laurel-proxy throttle off')}`,
+    '',
+  ].join('\n');
 }

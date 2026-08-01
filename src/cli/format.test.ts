@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest';
-import { formatRequests, formatRequest, formatTailLine, formatReplayResponse, formatDiff } from './format.js';
+import { formatRequests, formatRequest, formatTailLine, formatReplayResponse, formatDiff, formatThrottleSettings } from './format.js';
 import type { RequestRecord, PaginatedResponse, ReplayResponse } from '../shared/types.js';
+import { THROTTLE_PRESETS } from '../server/throttle.js';
 
 function makeRequest(overrides: Partial<RequestRecord> = {}): RequestRecord {
   return {
@@ -230,5 +231,49 @@ describe('formatDiff', () => {
     expect(parsed.result).toBe('improved');
     expect(parsed.status_changed).toBe(true);
     expect(parsed.body_changed).toBe(true);
+  });
+});
+
+// ── formatThrottleSettings ──
+
+describe('formatThrottleSettings', () => {
+  it('reports disabled state in table format', () => {
+    const out = formatThrottleSettings(
+      { enabled: false, downKbps: 0, upKbps: 0, latencyMs: 0 },
+      THROTTLE_PRESETS,
+      'table',
+    );
+    expect(out).toContain('disabled');
+  });
+
+  it('reports active rates in table format', () => {
+    const out = formatThrottleSettings(
+      { enabled: true, downKbps: 780, upKbps: 330, latencyMs: 100 },
+      THROTTLE_PRESETS,
+      'table',
+    );
+    expect(out).toContain('780');
+    expect(out).toContain('330');
+    expect(out).toContain('100');
+  });
+
+  it('emits parseable JSON', () => {
+    const out = formatThrottleSettings(
+      { enabled: true, downKbps: 780, upKbps: 330, latencyMs: 100 },
+      THROTTLE_PRESETS,
+      'json',
+    );
+    expect(JSON.parse(out).settings.downKbps).toBe(780);
+  });
+
+  it('lists preset names when disabled', () => {
+    const out = formatThrottleSettings(
+      { enabled: false, downKbps: 0, upKbps: 0, latencyMs: 0 },
+      THROTTLE_PRESETS,
+      'table',
+    );
+    for (const name of Object.keys(THROTTLE_PRESETS)) {
+      expect(out).toContain(name);
+    }
   });
 });

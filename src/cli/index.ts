@@ -11,6 +11,7 @@ import { registerUninstallCa } from './commands/uninstall-ca.js';
 import { registerProxyOn } from './commands/proxy-on.js';
 import { registerProxyOff } from './commands/proxy-off.js';
 import { registerReplay } from './commands/replay.js';
+import { registerThrottle } from './commands/throttle.js';
 
 const program = new Command();
 program
@@ -38,5 +39,6 @@ registerUninstallCa(program);
 registerProxyOn(program);
 registerProxyOff(program);
 registerReplay(program);
+registerThrottle(program);
 
 program.parse();
