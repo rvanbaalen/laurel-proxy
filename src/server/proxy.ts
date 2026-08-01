@@ -8,12 +8,14 @@ import type { Config, RequestRecord } from '../shared/types.js';
 import { listenWithRetry } from './port-utils.js';
 import { handleExchange, resolveHttpTarget, resolveMitmTarget } from './exchange.js';
 import type { ExchangeDeps } from './exchange.js';
+import type { Throttler } from './throttle.js';
 
 export class ProxyServer {
   private server: http.Server | null = null;
   private sockets: Set<net.Socket> = new Set();
   private writeQueue: RequestRecord[] = [];
   private writeTimer: ReturnType<typeof setInterval> | null = null;
+  private throttler: Throttler | null = null;
 
   constructor(
     private db: Database,
@@ -62,6 +64,10 @@ export class ProxyServer {
     return addr?.port ?? 0;
   }
 
+  setThrottler(throttler: Throttler): void {
+    this.throttler = throttler;
+  }
+
   private flushWrites(): void {
     if (this.writeQueue.length === 0) return;
     const batch = this.writeQueue;
@@ -76,6 +82,7 @@ export class ProxyServer {
         this.writeQueue.push(record);
         this.events.push(record);
       },
+      throttle: this.throttler ?? undefined,
     };
   }
 

@@ -4,6 +4,7 @@ import { once } from 'node:events';
 import { randomUUID } from 'node:crypto';
 import { URL } from 'node:url';
 import type { Config, RequestRecord } from '../shared/types.js';
+import type { Throttler } from './throttle.js';
 
 export interface ExchangeTarget {
   hostname: string;
@@ -16,6 +17,7 @@ export interface ExchangeTarget {
 export interface ExchangeDeps {
   config: Config;
   onRecord: (record: RequestRecord) => void;
+  throttle?: Throttler;
 }
 
 /** Hop-by-hop headers that must not be forwarded upstream. */
@@ -90,6 +92,13 @@ export async function handleExchange(
     ...(target.protocol === 'https' ? { rejectUnauthorized: false } : {}),
   };
 
+  // Pace the upload before sending the body upstream. Awaiting here (rather
+  // than chaining off an optionally-chained call) means this degrades to a
+  // plain no-op await when throttling is absent or disabled — see Throttler.
+  if (requestBody.length > 0) {
+    await deps.throttle?.up.consume(requestBody.length);
+  }
+
   let proxyRes: http.IncomingMessage;
   try {
     proxyRes = await new Promise<http.IncomingMessage>((resolve, reject) => {
@@ -105,6 +114,11 @@ export async function handleExchange(
     }
     return;
   }
+
+  // Inject configured latency once per exchange, before the first response
+  // byte reaches the client — this must not run per-chunk inside the
+  // streaming loop below.
+  await deps.throttle?.delayLatency();
 
   const resHeaders = { ...proxyRes.headers };
   // Strip upstream's framing header; we re-frame the response ourselves. If
@@ -128,6 +142,7 @@ export async function handleExchange(
         captured.push(slice);
         capturedLength += slice.length;
       }
+      await deps.throttle?.down.consume(chunk.length);
       if (!clientRes.write(chunk)) await once(clientRes, 'drain');
     }
     clientRes.end();

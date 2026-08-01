@@ -1,7 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
-import type { Config } from '../shared/types.js';
+import type { Config, ThrottleSettings } from '../shared/types.js';
 import { DEFAULT_CONFIG } from '../shared/types.js';
 
 function expandHome(filePath: string): string {
@@ -9,6 +9,16 @@ function expandHome(filePath: string): string {
     return path.join(os.homedir(), filePath.slice(1));
   }
   return filePath;
+}
+
+/**
+ * Resolve the config file location. Honours LAUREL_PROXY_CONFIG so tests (and
+ * later, the REST endpoint that persists throttle settings) can redirect
+ * config I/O to a temp file instead of touching the developer's real
+ * ~/.laurel-proxy/config.json.
+ */
+export function getConfigPath(): string {
+  return expandHome(process.env.LAUREL_PROXY_CONFIG ?? '~/.laurel-proxy/config.json');
 }
 
 function parseSize(value: string): number {
@@ -36,7 +46,7 @@ function parseDuration(value: string): number {
 export function loadConfig(cliFlags: Partial<Config> = {}): Config {
   let fileConfig: Partial<Config> = {};
 
-  const configPath = expandHome('~/.laurel-proxy/config.json');
+  const configPath = getConfigPath();
   if (fs.existsSync(configPath)) {
     try {
       const raw = JSON.parse(fs.readFileSync(configPath, 'utf-8'));
@@ -48,6 +58,7 @@ export function loadConfig(cliFlags: Partial<Config> = {}): Config {
         maxDbSize: typeof raw.maxDbSize === 'string' ? parseSize(raw.maxDbSize) : raw.maxDbSize,
         maxBodySize: typeof raw.maxBodySize === 'string' ? parseSize(raw.maxBodySize) : raw.maxBodySize,
         certCacheSize: raw.certCacheSize,
+        throttle: raw.throttle,
       };
       for (const key of Object.keys(fileConfig) as (keyof Config)[]) {
         if (fileConfig[key] === undefined) delete fileConfig[key];
@@ -66,6 +77,22 @@ export function loadConfig(cliFlags: Partial<Config> = {}): Config {
   merged.dbPath = expandHome(merged.dbPath);
 
   return merged;
+}
+
+/** Persist throttle settings back to the config file, preserving other keys. */
+export function saveThrottleSettings(settings: ThrottleSettings): void {
+  const configPath = getConfigPath();
+  let raw: Record<string, unknown> = {};
+  if (fs.existsSync(configPath)) {
+    try {
+      raw = JSON.parse(fs.readFileSync(configPath, 'utf-8'));
+    } catch {
+      raw = {};
+    }
+  }
+  raw.throttle = settings;
+  fs.mkdirSync(path.dirname(configPath), { recursive: true });
+  fs.writeFileSync(configPath, `${JSON.stringify(raw, null, 2)}\n`);
 }
 
 export { expandHome, parseSize, parseDuration };

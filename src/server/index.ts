@@ -11,6 +11,7 @@ import { Cleanup } from '../storage/cleanup.js';
 import { createApiRouter } from './api.js';
 import type { ProxyControl } from './api.js';
 import { listenWithRetry } from './port-utils.js';
+import { Throttler } from './throttle.js';
 
 export class LaurelProxyServer {
   private db: Database;
@@ -18,6 +19,7 @@ export class LaurelProxyServer {
   private proxy: ProxyServer;
   private events: EventManager;
   private cleanup: Cleanup;
+  private throttleController: Throttler;
   private apiServer: http.Server | null = null;
   private connections: Set<net.Socket> = new Set();
   private proxyRunning = false;
@@ -29,7 +31,13 @@ export class LaurelProxyServer {
     this.ca = new CertificateAuthority(caDir, config.certCacheSize);
     this.events = new EventManager();
     this.proxy = new ProxyServer(this.db, this.ca, this.events, config);
+    this.throttleController = new Throttler(config.throttle);
+    this.proxy.setThrottler(this.throttleController);
     this.cleanup = new Cleanup(this.db, config);
+  }
+
+  get throttler(): Throttler {
+    return this.throttleController;
   }
 
   async start(): Promise<{ proxyPort: number; uiPort: number }> {

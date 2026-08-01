@@ -43,6 +43,7 @@ export interface Config {
   maxDbSize: number;
   maxBodySize: number;
   certCacheSize: number;
+  throttle: ThrottleSettings;
 }
 
 export const DEFAULT_CONFIG: Config = {
@@ -53,6 +54,7 @@ export const DEFAULT_CONFIG: Config = {
   maxDbSize: 500 * 1024 * 1024,
   maxBodySize: 1 * 1024 * 1024,
   certCacheSize: 500,
+  throttle: DEFAULT_THROTTLE,
 };
 
 export interface PaginatedResponse<T> {
