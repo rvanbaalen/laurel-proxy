@@ -1,8 +1,19 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import { RateLimiter, Throttler, THROTTLE_PRESETS, kbpsToBytesPerSec } from './throttle.js';
 import type { Clock } from './throttle.js';
 
-/** Deterministic clock: sleep advances virtual time instantly. */
+/**
+ * Deterministic clock: sleep advances virtual time instantly by adding its
+ * `ms` to a shared counter. This models "sum of all sleep durations", NOT
+ * elapsed wall-clock time — it cannot distinguish two overlapping 500ms
+ * waits (which should still total 500ms of real time) from two sequential
+ * ones (which correctly total 1000ms), because it just accumulates every
+ * call's `ms` unconditionally. That makes it fine — and the only honest
+ * option — for the single-consumer arithmetic tests below, but structurally
+ * incapable of guarding shared-pipe concurrency. The concurrency test
+ * further down deliberately uses `vi.useFakeTimers()` instead; do not
+ * "simplify" it back to this helper.
+ */
 function fakeClock(): Clock & { elapsed: number } {
   const c = {
     elapsed: 0,
@@ -34,17 +45,37 @@ describe('RateLimiter', () => {
     expect(clock.elapsed).toBe(1000); // 1 second for 1000 bytes
   });
 
+  // This test must use Vitest fake timers, NOT the fakeClock helper above.
+  // fakeClock.sleep() adds its `ms` to `elapsed` unconditionally, so it models
+  // "sum of all sleeps" rather than elapsed wall-clock time: two overlapping
+  // 500ms waits total 1000ms there, identical to correct serialised behaviour.
+  // That makes the helper structurally incapable of detecting a regression that
+  // yields before committing the reservation. vi.useFakeTimers() mocks Date.now
+  // and setTimeout coherently, so overlap is modelled properly.
   it('serialises genuinely concurrent consumers onto one shared pipe', async () => {
-    const clock = fakeClock();
-    const limiter = new RateLimiter(1000, clock);
-    // Fire both WITHOUT an intervening await, so two calls are actually in
-    // flight at once. A sequential `await a; await b;` version of this test
-    // passes even if each caller independently computes its own wait — it
-    // cannot detect a regression that yields before committing the
-    // reservation, which would silently give every connection the full rate.
-    await Promise.all([limiter.consume(500), limiter.consume(500)]);
-    // Two 500-byte reservations on a 1000 B/s link total 1 second.
-    expect(clock.elapsed).toBe(1000);
+    vi.useFakeTimers();
+    try {
+      const limiter = new RateLimiter(1000); // default realClock, both faked
+      const startedAt = Date.now();
+      let completed = 0;
+      const both = Promise.all([
+        limiter.consume(500).then(() => { completed++; }),
+        limiter.consume(500).then(() => { completed++; }),
+      ]);
+
+      // After 500ms only the FIRST reservation may have completed. If the
+      // implementation yielded before committing, both would have reserved
+      // 0-500ms and both would finish here — which is the regression.
+      await vi.advanceTimersByTimeAsync(500);
+      expect(completed).toBe(1);
+
+      await vi.advanceTimersByTimeAsync(500);
+      await both;
+      expect(completed).toBe(2);
+      expect(Date.now() - startedAt).toBe(1000);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('never rounds a small nonzero rate down to unlimited', async () => {
