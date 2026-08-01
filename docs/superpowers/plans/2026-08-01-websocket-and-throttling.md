@@ -1395,21 +1395,30 @@ git commit -m "feat: add throttle control to web UI"
 Pure and I/O-free, so it tests exhaustively without sockets. This is the highest-risk correctness surface in the plan; test it hard.
 
 **Files:**
-- Create: `src/server/ws-frames.ts`
+- Create: `src/server/ws-frames.ts`, `tests/helpers/ws-frames.ts`
 - Test: `src/server/ws-frames.test.ts`
 
 **Interfaces:**
 - Produces:
   ```ts
+  // src/server/ws-frames.ts — production
   export type WsOpcode = 'text' | 'binary' | 'ping' | 'pong' | 'close';
   export interface WsMessage { opcode: WsOpcode; payload: Buffer; }
   export class WsFrameDecoder {
     push(chunk: Buffer): WsMessage[];
     get isFailed(): boolean;
   }
+
+  // tests/helpers/ws-frames.ts — test scaffolding only
   export function encodeFrame(opcode: WsOpcode, payload: Buffer, mask?: boolean): Buffer;
   ```
-  `encodeFrame` exists so tests and `ws-replay.ts` can build valid frames; the proxy relay never encodes.
+  **`encodeFrame` lives in `tests/helpers/`, not in `src/`.** The proxy relay never
+  encodes frames — it passes bytes through untouched — so an encoder in production
+  code would be an unused export. It exists only so unit tests and the test echo
+  servers in Tasks 9 and 12 can build valid frames. `tests/` is outside
+  `tsconfig.server.json`'s `include`, so the helper never ships in `dist/`.
+  (Note that `exclude: ["src/**/*.test.ts"]` would NOT have excluded a
+  `src/server/ws-frames.test-helpers.ts`, which is why the helper lives outside `src/`.)
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -1417,7 +1426,8 @@ Create `src/server/ws-frames.test.ts`:
 
 ```ts
 import { describe, it, expect } from 'vitest';
-import { WsFrameDecoder, encodeFrame } from './ws-frames.js';
+import { WsFrameDecoder } from './ws-frames.js';
+import { encodeFrame } from '../../tests/helpers/ws-frames.js';
 
 describe('WsFrameDecoder', () => {
   it('decodes a single unmasked text frame', () => {
@@ -1659,7 +1669,30 @@ export class WsFrameDecoder {
   }
 }
 
-/** Build a valid frame. Used by tests and by WebSocket replay, never by the relay. */
+Note the `OPCODE_BYTES` map above is used only by `encodeFrame`; move it to the test
+helper too and delete it from `ws-frames.ts`, leaving only the decode-side `OPCODES` map.
+
+- [ ] **Step 3b: Create the test helper**
+
+Create `tests/helpers/ws-frames.ts`:
+
+```ts
+// ws-frames.ts owns WsOpcode at this point; Task 8 moves the definition to
+// shared/types.ts and re-exports it from here, so this import keeps working.
+import type { WsOpcode } from '../../src/server/ws-frames.js';
+
+const OPCODE_BYTES: Record<WsOpcode, number> = {
+  text: 0x1,
+  binary: 0x2,
+  close: 0x8,
+  ping: 0x9,
+  pong: 0xa,
+};
+
+/**
+ * Build a valid RFC 6455 frame. Test scaffolding only — the proxy relay passes
+ * bytes through untouched and never encodes.
+ */
 export function encodeFrame(opcode: WsOpcode, payload: Buffer, mask = false): Buffer {
   const header: number[] = [0x80 | OPCODE_BYTES[opcode]];
   const maskBit = mask ? 0x80 : 0x00;
@@ -1695,7 +1728,7 @@ Expected: PASS (12 tests)
 - [ ] **Step 5: Commit**
 
 ```bash
-git add src/server/ws-frames.ts src/server/ws-frames.test.ts
+git add src/server/ws-frames.ts src/server/ws-frames.test.ts tests/helpers/ws-frames.ts
 git commit -m "feat: add RFC 6455 WebSocket frame decoder"
 ```
 
@@ -2002,7 +2035,8 @@ import fs from 'node:fs';
 import { LaurelProxyServer } from '../../src/server/index.js';
 import { loadConfig } from '../../src/server/config.js';
 import { Database } from '../../src/storage/db.js';
-import { WsFrameDecoder, encodeFrame } from '../../src/server/ws-frames.js';
+import { WsFrameDecoder } from '../../src/server/ws-frames.js';
+import { encodeFrame } from '../helpers/ws-frames.js';
 
 const GUID = '258EAFA5-E914-47DA-95CA-C5AB0DC85B11';
 
@@ -2429,47 +2463,35 @@ And inside `handleConnect`, register the same on the virtual server so `wss://` 
       });
 ```
 
-`events.pushWsMessages` does not exist yet — add a temporary no-op to `EventManager`
-now and implement it properly in Task 10:
+- [ ] **Step 4b: Implement the EventManager WebSocket channel**
+
+`events.pushWsMessages` does not exist yet. Implement it **for real now** — no
+temporary stub — mirroring the existing request subscriber pattern in
+`src/server/events.ts`:
 
 ```ts
-  pushWsMessages(_messages: WebSocketMessage[]): void {}
+import type { RequestRecord, WebSocketMessage } from '../shared/types.js';
+
+type WsMessageSubscriber = (messages: WebSocketMessage[]) => void;
 ```
+```ts
+  private wsSubscribers: Set<WsMessageSubscriber> = new Set();
 
-- [ ] **Step 5: Run the integration test**
+  pushWsMessages(messages: WebSocketMessage[]): void {
+    if (messages.length === 0) return;
+    for (const sub of this.wsSubscribers) {
+      try { sub(messages); } catch {}
+    }
+  }
 
-Run: `npx vitest run tests/integration/websocket.integration.test.ts`
-Expected: PASS (2 tests)
-
-- [ ] **Step 6: Run the full suite**
-
-Run: `npm test`
-Expected: PASS
-
-- [ ] **Step 7: Commit**
-
-```bash
-git add src/server/websocket.ts src/server/proxy.ts src/server/events.ts tests/integration/websocket.integration.test.ts
-git commit -m "feat: capture WebSocket traffic through the proxy"
+  subscribeWsMessages(fn: WsMessageSubscriber): () => void {
+    this.wsSubscribers.add(fn);
+    return () => { this.wsSubscribers.delete(fn); };
+  }
 ```
+In `stop()`, add `this.wsSubscribers.clear();`.
 
----
-
-### Task 10: WebSocket message API and live events
-
-**Files:**
-- Modify: `src/server/events.ts`, `src/server/api.ts`
-- Test: `src/server/events.test.ts`, `src/server/api.test.ts` (add cases)
-
-**Interfaces:**
-- Produces: `EventManager.pushWsMessages(messages: WebSocketMessage[]): void`,
-  `EventManager.subscribeWsMessages(fn: (messages: WebSocketMessage[]) => void): () => void`;
-  `GET /api/requests/:id/messages?limit&offset` → `PaginatedResponse<WebSocketMessage>` with base64 payloads;
-  SSE `ws-message` event
-
-- [ ] **Step 1: Write the failing tests**
-
-Add to `src/server/events.test.ts`:
+Also add the two `EventManager` tests here (they were originally in Task 10):
 
 ```ts
   it('delivers websocket messages to subscribers', () => {
@@ -2497,6 +2519,41 @@ Add to `src/server/events.test.ts`:
   });
 ```
 
+- [ ] **Step 5: Run the integration test**
+
+Run: `npx vitest run tests/integration/websocket.integration.test.ts`
+Expected: PASS (2 tests)
+
+- [ ] **Step 6: Run the full suite**
+
+Run: `npm test`
+Expected: PASS
+
+- [ ] **Step 7: Commit**
+
+```bash
+git add src/server/websocket.ts src/server/proxy.ts src/server/events.ts src/server/events.test.ts tests/integration/websocket.integration.test.ts
+git commit -m "feat: capture WebSocket traffic through the proxy"
+```
+
+---
+
+### Task 10: WebSocket message REST endpoint and SSE forwarding
+
+The `EventManager` channel itself was implemented in Task 9 (Step 4b), which owns its
+unit tests. This task adds only the HTTP surface on top of it.
+
+**Files:**
+- Modify: `src/server/api.ts`
+- Test: `src/server/api.test.ts` (add cases)
+
+**Interfaces:**
+- Consumes: `EventManager.subscribeWsMessages` (Task 9), `db.getWebSocketMessages` (Task 8)
+- Produces: `GET /api/requests/:id/messages?limit&offset` → `PaginatedResponse<WebSocketMessage>`
+  with base64 payloads; SSE `ws-message` event
+
+- [ ] **Step 1: Write the failing tests**
+
 Add to `src/server/api.test.ts`:
 
 ```ts
@@ -2521,37 +2578,10 @@ Add to `src/server/api.test.ts`:
 
 - [ ] **Step 2: Run to verify they fail**
 
-Run: `npx vitest run src/server/events.test.ts src/server/api.test.ts`
-Expected: FAIL — `subscribeWsMessages` missing; 404 on the messages route
+Run: `npx vitest run src/server/api.test.ts`
+Expected: FAIL — 404 on the messages route
 
-- [ ] **Step 3: Implement the event channel**
-
-In `src/server/events.ts`, replace the Task 9 no-op with a real implementation
-mirroring the existing request buffering:
-
-```ts
-import type { RequestRecord, WebSocketMessage } from '../shared/types.js';
-
-type WsMessageSubscriber = (messages: WebSocketMessage[]) => void;
-```
-```ts
-  private wsSubscribers: Set<WsMessageSubscriber> = new Set();
-
-  pushWsMessages(messages: WebSocketMessage[]): void {
-    if (messages.length === 0) return;
-    for (const sub of this.wsSubscribers) {
-      try { sub(messages); } catch {}
-    }
-  }
-
-  subscribeWsMessages(fn: WsMessageSubscriber): () => void {
-    this.wsSubscribers.add(fn);
-    return () => { this.wsSubscribers.delete(fn); };
-  }
-```
-In `stop()`, add `this.wsSubscribers.clear();`.
-
-- [ ] **Step 4: Add the endpoint and SSE channel**
+- [ ] **Step 3: Add the endpoint and SSE channel**
 
 In `src/server/api.ts`, add a serializer and the route:
 
@@ -2583,15 +2613,15 @@ Extend the `/events` handler to forward the new channel:
 ```
 and add `unsubWs();` to the `req.on('close', ...)` cleanup.
 
-- [ ] **Step 5: Run to verify they pass**
+- [ ] **Step 4: Run to verify they pass**
 
-Run: `npx vitest run src/server/events.test.ts src/server/api.test.ts`
+Run: `npx vitest run src/server/api.test.ts`
 Expected: PASS
 
-- [ ] **Step 6: Commit**
+- [ ] **Step 5: Commit**
 
 ```bash
-git add src/server/events.ts src/server/events.test.ts src/server/api.ts src/server/api.test.ts
+git add src/server/api.ts src/server/api.test.ts
 git commit -m "feat: expose websocket messages via REST and SSE"
 ```
 
@@ -2905,7 +2935,8 @@ import http from 'node:http';
 import net from 'node:net';
 import crypto from 'node:crypto';
 import { replayWebSocket, recordToWsReplayRequest } from './ws-replay.js';
-import { WsFrameDecoder, encodeFrame } from './ws-frames.js';
+import { WsFrameDecoder } from './ws-frames.js';
+import { encodeFrame } from '../../tests/helpers/ws-frames.js';
 import type { RequestRecord, WebSocketMessage } from '../shared/types.js';
 
 const GUID = '258EAFA5-E914-47DA-95CA-C5AB0DC85B11';
