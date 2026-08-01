@@ -12,7 +12,11 @@ export const realClock: Clock = {
 };
 
 export function kbpsToBytesPerSec(kbps: number): number {
-  return Math.round((kbps * 1000) / 8);
+  if (kbps <= 0) return 0;
+  // Clamp to at least 1 B/s. RateLimiter treats 0 as "unlimited", so rounding a
+  // small-but-nonzero rate down to 0 would turn a very slow link into an
+  // unthrottled one — the exact opposite of what was configured.
+  return Math.max(1, Math.round((kbps * 1000) / 8));
 }
 
 /**
