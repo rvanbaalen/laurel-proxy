@@ -1246,14 +1246,15 @@ import type { Command } from 'commander';
 import http from 'node:http';
 import { formatThrottleSettings } from '../format.js';
 import { THROTTLE_PRESETS } from '../../server/throttle.js';
-import type { ThrottleSettings } from '../../shared/types.js';
+import type { ThrottleSettings, ThrottleProfile } from '../../shared/types.js';
 
-interface ApiResult {
+export interface ApiResult {
   status: number;
   body: Record<string, unknown>;
 }
 
-function api(port: number, method: string, path: string, payload?: unknown): Promise<ApiResult> {
+/** Exported so the integration test can drive it against a real server. */
+export function api(port: number, method: string, path: string, payload?: unknown): Promise<ApiResult> {
   return new Promise((resolve, reject) => {
     const data = payload === undefined ? null : Buffer.from(JSON.stringify(payload));
     const req = http.request(
@@ -1310,7 +1311,7 @@ export function registerThrottle(program: Command): void {
           console.log(
             formatThrottleSettings(
               res.body.settings as ThrottleSettings,
-              res.body.presets as Record<string, never>,
+              res.body.presets as Record<string, ThrottleProfile>,
               opts.format,
             ),
           );
@@ -1358,18 +1359,42 @@ import { registerThrottle } from './commands/throttle.js';
 registerThrottle(program);
 ```
 
-- [ ] **Step 7: Verify end-to-end by hand**
+- [ ] **Step 7: Verify end-to-end with an automated test**
 
-```bash
-npm run build
-node dist/cli/index.js start &
-sleep 3
-node dist/cli/index.js throttle 3g
-node dist/cli/index.js throttle --status
-node dist/cli/index.js throttle off
-node dist/cli/index.js stop
+Do **not** verify by running `laurel-proxy start`. It is a blocking interactive Ink
+TUI (unusable from a non-interactive shell) and it sits next to code that can mutate
+the developer's real macOS system proxy settings. Never run a step that changes the
+host's network configuration.
+
+Instead, export the command module's `api()` helper and add
+`tests/integration/throttle-cli.integration.test.ts` that boots a real
+`LaurelProxyServer` on ephemeral ports (`proxyPort: 0, uiPort: 0`), points `api()` at
+the actual `uiPort`, and exercises the round trip:
+
+```ts
+    // GET reports the default disabled state
+    const initial = await api(uiPort, 'GET', '/api/throttle');
+    expect(initial.status).toBe(200);
+    expect((initial.body.settings as ThrottleSettings).enabled).toBe(false);
+
+    // PUT a preset, then confirm GET agrees — proves the CLI's transport works
+    // against the real router, not a mock.
+    const applied = await api(uiPort, 'PUT', '/api/throttle', { preset: '3g' });
+    expect(applied.status).toBe(200);
+    expect(applied.body.settings).toEqual({
+      enabled: true, downKbps: 780, upKbps: 330, latencyMs: 100,
+    });
+
+    const after = await api(uiPort, 'GET', '/api/throttle');
+    expect((after.body.settings as ThrottleSettings).downKbps).toBe(780);
 ```
-Expected: `3g` prints enabled with 780/330/100; `--status` agrees; `off` prints disabled.
+
+Set `process.env.LAUREL_PROXY_CONFIG` to a temp path in `beforeAll` and restore it in
+`afterAll`, because `PUT` persists — otherwise the test writes the developer's real
+`~/.laurel-proxy/config.json`.
+
+Formatter behaviour is covered by the pure unit tests in Step 1; this test covers the
+transport and the wiring.
 
 - [ ] **Step 8: Commit**
 
