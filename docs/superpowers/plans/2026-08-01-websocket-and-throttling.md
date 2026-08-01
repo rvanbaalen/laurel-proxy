@@ -287,6 +287,9 @@ export async function handleExchange(
     host: target.hostname,
     path: new URL(target.url).pathname || '/',
     protocol: target.protocol,
+    // Use target.path, NOT `new URL(target.url).pathname` — the latter drops the
+    // query string, which the pre-refactor MITM handler preserved. Losing it
+    // would be an unsanctioned third behaviour change.
     request_headers: JSON.stringify(clientReq.headers),
     request_body:
       requestBody.length > 0 ? requestBody.subarray(0, config.maxBodySize) : null,
@@ -471,13 +474,26 @@ describe('RateLimiter', () => {
     expect(clock.elapsed).toBe(1000); // 1 second for 1000 bytes
   });
 
-  it('serialises concurrent consumers onto one shared pipe', async () => {
+  it('serialises genuinely concurrent consumers onto one shared pipe', async () => {
     const clock = fakeClock();
     const limiter = new RateLimiter(1000, clock);
-    await limiter.consume(500);
-    await limiter.consume(500);
+    // Fire both WITHOUT an intervening await, so two calls are actually in
+    // flight at once. A sequential `await a; await b;` version of this test
+    // passes even if each caller independently computes its own wait — it
+    // cannot detect a regression that yields before committing the
+    // reservation, which would silently give every connection the full rate.
+    await Promise.all([limiter.consume(500), limiter.consume(500)]);
     // Two 500-byte reservations on a 1000 B/s link total 1 second.
     expect(clock.elapsed).toBe(1000);
+  });
+
+  it('never rounds a small nonzero rate down to unlimited', async () => {
+    const clock = fakeClock();
+    // 0.001 kbps would round to 0 B/s, and 0 is the "unlimited" sentinel —
+    // a very slow link must never become an unthrottled one.
+    const limiter = new RateLimiter(kbpsToBytesPerSec(0.001), clock);
+    await limiter.consume(10);
+    expect(clock.elapsed).toBeGreaterThan(0);
   });
 
   it('applies a new rate to subsequent reservations', async () => {
@@ -582,7 +598,11 @@ export const realClock: Clock = {
 };
 
 export function kbpsToBytesPerSec(kbps: number): number {
-  return Math.round((kbps * 1000) / 8);
+  if (kbps <= 0) return 0;
+  // Clamp to at least 1 B/s. RateLimiter treats 0 as "unlimited", so rounding a
+  // small-but-nonzero rate down to 0 would turn a very slow link into an
+  // unthrottled one — the exact opposite of what was configured.
+  return Math.max(1, Math.round((kbps * 1000) / 8));
 }
 
 /**
