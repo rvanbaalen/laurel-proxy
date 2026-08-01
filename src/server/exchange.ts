@@ -119,6 +119,7 @@ export async function handleExchange(
   let capturedLength = 0;
   let responseSize = 0;
 
+  let streamFailed = false;
   try {
     for await (const chunk of proxyRes as AsyncIterable<Buffer>) {
       responseSize += chunk.length;
@@ -132,7 +133,13 @@ export async function handleExchange(
     clientRes.end();
   } catch {
     clientRes.destroy();
+    streamFailed = true;
   }
+
+  // A response that failed or was aborted mid-transfer must not be recorded
+  // as if it completed — a partial body with status 200 would be actively
+  // misleading for the network failures this proxy exists to diagnose.
+  if (streamFailed) return;
 
   const responseBody = Buffer.concat(captured);
   const truncated =
@@ -146,7 +153,7 @@ export async function handleExchange(
     method: clientReq.method || 'GET',
     url: target.url,
     host: target.hostname,
-    path: new URL(target.url).pathname || '/',
+    path: target.path,
     protocol: target.protocol,
     request_headers: JSON.stringify(clientReq.headers),
     request_body:

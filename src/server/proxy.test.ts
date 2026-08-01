@@ -302,6 +302,24 @@ describe('ProxyServer - HTTPS', () => {
     expect(result.data[0].status).toBe(200);
   });
 
+  it('retains the query string in the recorded path for HTTPS requests', async () => {
+    const tlsSocket = await connectThroughProxy(proxyPort, 'localhost', targetPort, caCertPem);
+
+    const res = await httpsGetThroughTunnel(tlsSocket, 'localhost', '/secure-json?foo=bar&baz=2');
+
+    expect(res.status).toBe(200);
+
+    tlsSocket.destroy();
+
+    await new Promise(r => setTimeout(r, 300));
+
+    const result = db.query({});
+    expect(result.data[0].url).toBe('https://localhost/secure-json?foo=bar&baz=2');
+    // Regression: the recorded path must keep the query string, not just the
+    // pathname — a re-derivation from the URL previously dropped it.
+    expect(result.data[0].path).toBe('/secure-json?foo=bar&baz=2');
+  });
+
   it('captures HTTPS POST request body via CONNECT tunnel', async () => {
     const tlsSocket = await connectThroughProxy(proxyPort, 'localhost', targetPort, caCertPem);
     const postBody = 'secure post body';
