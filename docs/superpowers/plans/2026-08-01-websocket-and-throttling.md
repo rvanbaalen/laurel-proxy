@@ -899,20 +899,37 @@ export interface ExchangeDeps {
 }
 ```
 
-Pace the upload by replacing the upstream write block:
+Pace the upload by awaiting **before** opening the upstream request. Leave the
+existing `transport.request(...)` promise block exactly as Task 1 wrote it:
 
 ```ts
-      const req = transport.request(options, resolve);
-      req.on('error', reject);
-      if (requestBody.length > 0) {
-        void deps.throttle?.up.consume(requestBody.length).then(() => {
-          req.write(requestBody);
-          req.end();
-        });
-      } else {
-        req.end();
-      }
+  // Pace the upload before sending the body upstream.
+  if (requestBody.length > 0) {
+    await deps.throttle?.up.consume(requestBody.length);
+  }
+
+  let proxyRes: http.IncomingMessage;
+  try {
+    proxyRes = await new Promise<http.IncomingMessage>((resolve, reject) => {
+      // ...unchanged from Task 1...
 ```
+
+**Do NOT write it as a `.then()` on an optionally-chained call.** An earlier draft of
+this plan had:
+
+```ts
+      // BROKEN — do not use
+      void deps.throttle?.up.consume(requestBody.length).then(() => {
+        req.write(requestBody);
+        req.end();
+      });
+```
+
+Optional chaining short-circuits the *entire rest of the chain*: when
+`deps.throttle` is nullish the whole expression evaluates to `undefined` and the
+`.then` callback never runs, so `req.write`/`req.end` are never called and every
+request with a body hangs forever. Since `throttle` is optional on `ExchangeDeps`
+and absent in Task 1's unit tests, that would have broken the default path.
 
 Inject latency immediately before `clientRes.writeHead`:
 
