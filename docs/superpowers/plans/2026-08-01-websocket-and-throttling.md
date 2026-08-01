@@ -371,8 +371,13 @@ Append to `tests/integration/proxy.integration.test.ts` (match the existing desc
 
     const res = await proxiedGet(`http://127.0.0.1:${upstreamPort}/chunked`);
     expect(res.body).toBe('first-second-third');
-    // No transfer-encoding leaks through; we re-frame the response ourselves.
-    expect(res.headers['transfer-encoding']).toBeUndefined();
+    // We stream without knowing the total length, so Node re-frames the body as
+    // chunked. That is correct proxy behaviour: the proxy genuinely IS chunking.
+    // Crucially the connection stays reusable — we must NOT fall back to
+    // `connection: close`, which would break keep-alive for every chunked
+    // response and tear down MITM CONNECT tunnels after one exchange.
+    expect(res.headers['transfer-encoding']).toBe('chunked');
+    expect(res.headers['connection']).not.toBe('close');
 
     upstream.close();
   });
