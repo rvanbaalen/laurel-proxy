@@ -18,6 +18,23 @@ export interface RequestRecord {
   truncated: number;
 }
 
+export interface ThrottleProfile {
+  downKbps: number;
+  upKbps: number;
+  latencyMs: number;
+}
+
+export interface ThrottleSettings extends ThrottleProfile {
+  enabled: boolean;
+}
+
+export const DEFAULT_THROTTLE: ThrottleSettings = {
+  enabled: false,
+  downKbps: 0,
+  upKbps: 0,
+  latencyMs: 0,
+};
+
 export interface Config {
   proxyPort: number;
   uiPort: number;
