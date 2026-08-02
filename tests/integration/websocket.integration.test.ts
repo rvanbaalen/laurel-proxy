@@ -68,6 +68,51 @@ function startEchoServer(opts: EchoOptions = {}): Promise<EchoServer> {
   });
 }
 
+interface ByteSink extends EchoServer {
+  /** Everything received after the handshake, undecoded. */
+  bytes(): Buffer;
+  waitForBytes(total: number): Promise<void>;
+}
+
+/**
+ * Accepts the handshake and then collects raw bytes without decoding them, so a
+ * stream the proxy's decoder refuses can still be compared byte for byte.
+ */
+function startByteSink(): Promise<ByteSink> {
+  const chunks: Buffer[] = [];
+  const waiters: { total: number; resolve: () => void }[] = [];
+  const server = http.createServer();
+  server.on('upgrade', (req, socket: net.Socket) => {
+    socket.write(
+      'HTTP/1.1 101 Switching Protocols\r\n' +
+      'Upgrade: websocket\r\nConnection: Upgrade\r\n' +
+      `Sec-WebSocket-Accept: ${acceptFor(req.headers['sec-websocket-key'] as string)}\r\n\r\n`,
+    );
+    socket.on('data', (chunk: Buffer) => {
+      chunks.push(chunk);
+      const received = chunks.reduce((sum, c) => sum + c.length, 0);
+      for (const waiter of waiters.splice(0)) {
+        if (received >= waiter.total) waiter.resolve();
+        else waiters.push(waiter);
+      }
+    });
+    socket.on('error', () => {});
+  });
+  return new Promise((resolve) => {
+    server.listen(0, '127.0.0.1', () =>
+      resolve({
+        server,
+        port: (server.address() as net.AddressInfo).port,
+        bytes: () => Buffer.concat(chunks),
+        waitForBytes: (total) =>
+          chunks.reduce((sum, c) => sum + c.length, 0) >= total
+            ? Promise.resolve()
+            : new Promise((r) => waiters.push({ total, resolve: r })),
+      }),
+    );
+  });
+}
+
 interface RawWebSocket {
   /** Text payloads decoded from the server, in arrival order. */
   texts: string[];
@@ -351,6 +396,41 @@ describe('websocket capture', () => {
     expect(payloadText(sent[0])).toBe(long.slice(0, DEFAULT_CONFIG.maxBodySize));
   }, 30_000);
 
+  it('keeps relaying after the frame decoder gives up on a direction', async () => {
+    const sink = await startByteSink();
+    const before = encodeFrame('text', Buffer.from('before'), true);
+    // RSV1 set. The relay strips Sec-WebSocket-Extensions, so a set RSV bit means
+    // the decoder's assumptions are broken: it rejects the frame and latches
+    // failed, which must degrade the recording and nothing else.
+    const reserved = encodeFrame('text', Buffer.from('reserved'), true);
+    reserved[0] |= 0x40;
+    const after = encodeFrame('text', Buffer.from('after'), true);
+    const expected = Buffer.concat([before, reserved, after]);
+
+    const socket = net.connect(proxyPort, '127.0.0.1');
+    await once(socket, 'connect');
+    try {
+      await rawWebSocket(socket, `http://127.0.0.1:${sink.port}/rsv`, `127.0.0.1:${sink.port}`);
+      socket.write(before);
+      socket.write(reserved);
+      socket.write(after);
+      await sink.waitForBytes(expected.length);
+      // Byte-identical, including the frame the decoder refused and everything
+      // after it: a recording that gave up must not cost the application a byte.
+      expect(sink.bytes().equals(expected)).toBe(true);
+    } finally {
+      socket.end();
+    }
+
+    await flushWrites();
+
+    const recording = readRecording(dbPath, '/rsv');
+    // Recording stops at the rejected frame. 'after' is missing rather than
+    // misattributed — a wrong frame boundary would be worse than a lost frame.
+    expect(recording.sent).toEqual(['before']);
+    sink.server.close();
+  }, 20_000);
+
   it('records a refused upgrade as an ordinary request', async () => {
     const plain = http.createServer((_req, res) => {
       res.writeHead(426, { 'Content-Type': 'text/plain' });
@@ -399,6 +479,61 @@ describe('websocket capture', () => {
     } finally {
       db.close();
       plain.close();
+    }
+  }, 20_000);
+
+  it('does not append a status line to a refusal it has begun relaying', async () => {
+    // Promises 20 body bytes, sends 7, then resets. The reset reaches the proxy
+    // as an 'error' on the upstream request after the refusal's head and part of
+    // its body have already gone to the client, so the client must get a
+    // truncated body — never one with an HTTP status line spliced into it.
+    const flaky = net.createServer((socket) => {
+      socket.once('data', () => {
+        socket.write('HTTP/1.1 426 Upgrade Required\r\nContent-Length: 20\r\n\r\npartial');
+        setTimeout(() => socket.resetAndDestroy(), 50);
+      });
+      socket.on('error', () => {});
+    });
+    await new Promise<void>((r) => flaky.listen(0, '127.0.0.1', r));
+    const flakyPort = (flaky.address() as net.AddressInfo).port;
+
+    const body = await new Promise<string>((resolve, reject) => {
+      const req = http.request({
+        host: '127.0.0.1',
+        port: proxyPort,
+        path: `http://127.0.0.1:${flakyPort}/half`,
+        headers: {
+          host: `127.0.0.1:${flakyPort}`,
+          Connection: 'Upgrade',
+          Upgrade: 'websocket',
+          'Sec-WebSocket-Key': crypto.randomBytes(16).toString('base64'),
+          'Sec-WebSocket-Version': '13',
+        },
+      });
+      let received = '';
+      req.on('response', (res) => {
+        res.on('data', (chunk: Buffer) => { received += chunk; });
+        res.on('end', () => resolve(received));
+        res.on('aborted', () => resolve(received));
+        res.on('error', () => resolve(received));
+      });
+      req.on('upgrade', () => reject(new Error('upstream refused, so no upgrade may be relayed')));
+      req.on('error', () => resolve(received));
+      req.end();
+    });
+
+    expect(body).toBe('partial');
+
+    await flushWrites();
+
+    const db = new Database(dbPath);
+    try {
+      // A half-transferred response goes unrecorded rather than being recorded
+      // as if it completed.
+      expect(db.query({ limit: 200 }).data.filter((r) => r.path === '/half')).toHaveLength(0);
+    } finally {
+      db.close();
+      flaky.close();
     }
   }, 20_000);
 

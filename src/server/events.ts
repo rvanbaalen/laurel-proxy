@@ -65,12 +65,20 @@ export class EventManager {
     return () => { this.wsSubscribers.delete(fn); };
   }
 
+  /**
+   * Stopped means stopped: the pending batch is dropped and every channel is
+   * released, so nothing can keep receiving from a manager that is down. All
+   * three subscriber sets are cleared — one SSE handler subscribes to all of
+   * them, so clearing only some would leave that handler half-connected.
+   */
   stop(): void {
     if (this.timer) {
       clearTimeout(this.timer);
       this.timer = null;
     }
     this.buffer = [];
+    this.requestSubscribers.clear();
+    this.statusSubscribers.clear();
     this.wsSubscribers.clear();
   }
 }

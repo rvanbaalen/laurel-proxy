@@ -1,8 +1,8 @@
 import http from 'node:http';
 import https from 'node:https';
-import { once } from 'node:events';
 import { randomUUID } from 'node:crypto';
 import { URL } from 'node:url';
+import { waitForDrain } from './stream-utils.js';
 import type { Config, RequestRecord } from '../shared/types.js';
 import type { Throttler } from './throttle.js';
 
@@ -143,7 +143,7 @@ export async function handleExchange(
         capturedLength += slice.length;
       }
       await deps.throttle?.down.consume(chunk.length);
-      if (!clientRes.write(chunk)) await once(clientRes, 'drain');
+      if (!clientRes.write(chunk)) await waitForDrain(clientRes);
     }
     clientRes.end();
   } catch {

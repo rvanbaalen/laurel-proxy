@@ -4,6 +4,7 @@ import net from 'node:net';
 import { randomUUID } from 'node:crypto';
 import { WsFrameDecoder } from './ws-frames.js';
 import type { WsMessage } from './ws-frames.js';
+import { waitForDrain } from './stream-utils.js';
 import type { ExchangeTarget } from './exchange.js';
 import type { Throttler, RateLimiter } from './throttle.js';
 import type { Config, RequestRecord, WebSocketMessage } from '../shared/types.js';
@@ -73,9 +74,12 @@ export function handleWebSocketUpgrade(
     ...(target.protocol === 'https' ? { rejectUnauthorized: false } : {}),
   });
 
-  // Once the 101 is relayed the client socket carries frames, so no HTTP status
-  // line may ever be written to it again.
+  // Anything already written to the client socket makes it too late to send a
+  // status line: after a 101 the socket carries frames, and after a refusal's
+  // head it carries that response's body. Appending an HTTP status line to
+  // either corrupts the stream, which is worse than truncating it.
   let upgraded = false;
+  let responseStarted = false;
   let upstreamSocket: net.Socket | null = null;
 
   upstreamReq.on('upgrade', (upstreamRes, socket: net.Socket, upstreamHead: Buffer) => {
@@ -89,7 +93,7 @@ export function handleWebSocketUpgrade(
     // Queued before any frame can be observed below. The proxy flushes the
     // request queue ahead of the frame queue on the same timer, so a reader can
     // never see a frame whose parent connection row is still missing.
-    deps.onRecord({
+    recordSafely(deps.onRecord, {
       ...requestFields,
       kind: 'websocket',
       status: upstreamRes.statusCode ?? 101,
@@ -109,11 +113,11 @@ export function handleWebSocketUpgrade(
     // (client→server, 'sent'). They are observed and forwarded before the pumps
     // start so neither the recording nor the relay reorders them.
     if (upstreamHead?.length) {
-      observe('received', upstreamHead);
+      observeSafely(observe, 'received', upstreamHead);
       clientSocket.write(upstreamHead);
     }
     if (head?.length) {
-      observe('sent', head);
+      observeSafely(observe, 'sent', head);
       socket.write(head);
     }
 
@@ -125,11 +129,16 @@ export function handleWebSocketUpgrade(
    * ordinary HTTP exchange: relay it and record it as one.
    */
   const relayRefusal = async (upstreamRes: http.IncomingMessage): Promise<void> => {
+    // Claimed before the first await: an upstream reset during the latency delay
+    // would otherwise emit 'error' on an IncomingMessage nobody listens to,
+    // which is an uncaught exception. The await loop below has its own handling.
+    upstreamRes.on('error', () => {});
     await deps.throttle?.delayLatency();
     // Upstream's framing headers cannot be forwarded: Node hands us an already
     // decoded body, so a relayed `Transfer-Encoding: chunked` would leave the
     // client reading plain bytes as chunk headers. `Connection: close` plus the
     // end() below delimits the body unambiguously in every case.
+    responseStarted = true;
     clientSocket.write(
       serializeHead(upstreamRes, ['Connection: close'], ['transfer-encoding', 'connection']),
     );
@@ -158,7 +167,7 @@ export function handleWebSocketUpgrade(
     clientSocket.end();
 
     const body = Buffer.concat(captured);
-    deps.onRecord({
+    recordSafely(deps.onRecord, {
       ...requestFields,
       kind: 'http',
       status: upstreamRes.statusCode ?? 0,
@@ -176,7 +185,7 @@ export function handleWebSocketUpgrade(
   upstreamReq.on('error', () => {
     // Mirrors the HTTP path's 502 so the client gets an answer rather than a
     // bare reset — but only while it is still waiting for one.
-    if (upgraded || clientSocket.destroyed) {
+    if (upgraded || responseStarted || clientSocket.destroyed) {
       clientSocket.destroy();
       return;
     }
@@ -222,24 +231,58 @@ function relay(
   // The caller already destroys this socket when the client errors; this is the
   // mirror image for the socket the caller never sees.
   upstreamSocket.on('error', () => clientSocket.destroy());
-  void pump(clientSocket, upstreamSocket, (chunk) => observe('sent', chunk), throttle?.up);
-  void pump(upstreamSocket, clientSocket, (chunk) => observe('received', chunk), throttle?.down);
+  void pump(clientSocket, upstreamSocket, observe, 'sent', throttle?.up);
+  void pump(upstreamSocket, clientSocket, observe, 'received', throttle?.down);
 }
 
 /**
- * Relays one direction byte for byte. `observe` is called for its side effects
- * only — its return value is ignored and the chunk that gets written is the one
- * that arrived, unmodified.
+ * The recording boundary for frames. The observer is called for its side effects
+ * and any failure it raises stops here.
+ *
+ * A thrown exception is control flow: left unguarded it would abort the pump's
+ * read loop and half-close the peer, which means a bug anywhere in the recording
+ * path — the decoder, the id generation, the write queue, an SSE subscriber —
+ * would kill a live application connection. That is the one thing the relay must
+ * never do, so the guarantee is made here, at the call site, rather than left to
+ * every future edit of the observer to preserve.
+ */
+function observeSafely(observe: Observer, direction: Direction, chunk: Buffer): void {
+  try {
+    observe(direction, chunk);
+  } catch {
+    // Recording failed for this chunk. The relay carries on regardless.
+  }
+}
+
+/**
+ * The same boundary for the connection row. `onRecord` reaches the write queue
+ * and every event subscriber, and on the accepted-upgrade path it runs inside an
+ * EventEmitter handler — where an unguarded throw would take down the process,
+ * not just the connection.
+ */
+function recordSafely(onRecord: (record: RequestRecord) => void, record: RequestRecord): void {
+  try {
+    onRecord(record);
+  } catch {
+    // The exchange happened whether or not we managed to record it.
+  }
+}
+
+/**
+ * Relays one direction byte for byte. Observation cannot influence what is
+ * written: the chunk handed to the observer is the one that arrived, the
+ * observer's return value is ignored, and its exceptions are absorbed.
  */
 async function pump(
   from: net.Socket,
   to: net.Socket,
-  observe: (chunk: Buffer) => void,
+  observe: Observer,
+  direction: Direction,
   limiter?: RateLimiter,
 ): Promise<void> {
   try {
     for await (const chunk of from as AsyncIterable<Buffer>) {
-      observe(chunk);
+      observeSafely(observe, direction, chunk);
       // `for await` handles read-side backpressure; consuming from the limiter
       // here (rather than chaining off the optional call) degrades to a plain
       // no-op await when throttling is absent — see Throttler.
@@ -255,31 +298,6 @@ async function pump(
   // twice; the guard covers end() on an already-destroyed socket, which would
   // otherwise raise an unhandled 'error'.
   if (!to.destroyed && !to.writableEnded) to.end();
-}
-
-/**
- * Resolves once `to` can take more data. A close or error settles it too:
- * awaiting only 'drain' would never return for a socket that went away, leaving
- * the pump suspended forever with both sockets pinned open.
- */
-function waitForDrain(to: net.Socket): Promise<void> {
-  return new Promise((resolve, reject) => {
-    if (to.destroyed) {
-      reject(new Error('socket closed'));
-      return;
-    }
-    const settle = (finish: () => void) => () => {
-      to.off('drain', onDrain);
-      to.off('close', onGone);
-      to.off('error', onGone);
-      finish();
-    };
-    const onDrain = settle(resolve);
-    const onGone = settle(() => reject(new Error('socket closed')));
-    to.on('drain', onDrain);
-    to.on('close', onGone);
-    to.on('error', onGone);
-  });
 }
 
 /**
