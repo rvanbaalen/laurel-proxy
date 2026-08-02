@@ -562,7 +562,9 @@ describe('websocket capture', () => {
     expect(recording.row.status).toBe(101);
     expect(recording.row.protocol).toBe('https');
     // The recorded URL keeps the https scheme; replay maps https:→wss: itself.
-    expect(recording.row.url).toBe('https://localhost/wss');
+    // The non-default port has to survive: it is the only thing that points a
+    // replay of this capture at the server that produced it.
+    expect(recording.row.url).toBe(`https://localhost:${secure.port}/wss`);
     expect(recording.sent).toEqual(['secure']);
     expect(recording.received).toEqual(['echo:secure']);
     secure.server.close();

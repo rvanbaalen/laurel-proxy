@@ -41,11 +41,15 @@ export function resolveHttpTarget(rawUrl: string): ExchangeTarget | null {
 }
 
 export function resolveMitmTarget(hostname: string, port: number, rawPath: string): ExchangeTarget {
+  // Include a non-default port in the recorded URL. Omitting it makes replay of
+  // any non-443 HTTPS capture silently target 443 — both for the HTTP Repeater
+  // and for WebSocket replay, which derive their target from this URL.
+  const authority = port === 443 ? hostname : `${hostname}:${port}`;
   return {
     hostname,
     port,
     protocol: 'https',
-    url: `https://${hostname}${rawPath}`,
+    url: `https://${authority}${rawPath}`,
     path: rawPath,
   };
 }

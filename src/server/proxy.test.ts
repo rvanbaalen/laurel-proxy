@@ -298,7 +298,9 @@ describe('ProxyServer - HTTPS', () => {
     const result = db.query({});
     expect(result.data[0].method).toBe('GET');
     expect(result.data[0].protocol).toBe('https');
-    expect(result.data[0].url).toBe('https://localhost/secure-json');
+    // The recorded URL carries the tunnelled port, so a replay of this capture
+    // targets the server it came from rather than 443.
+    expect(result.data[0].url).toBe(`https://localhost:${targetPort}/secure-json`);
     expect(result.data[0].status).toBe(200);
   });
 
@@ -314,7 +316,7 @@ describe('ProxyServer - HTTPS', () => {
     await new Promise(r => setTimeout(r, 300));
 
     const result = db.query({});
-    expect(result.data[0].url).toBe('https://localhost/secure-json?foo=bar&baz=2');
+    expect(result.data[0].url).toBe(`https://localhost:${targetPort}/secure-json?foo=bar&baz=2`);
     // Regression: the recorded path must keep the query string, not just the
     // pathname — a re-derivation from the URL previously dropped it.
     expect(result.data[0].path).toBe('/secure-json?foo=bar&baz=2');

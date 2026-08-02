@@ -34,6 +34,18 @@ describe('resolveMitmTarget', () => {
       path: '/a?b=2',
     });
   });
+
+  it('keeps a non-default port in the recorded URL and omits 443', () => {
+    // The recorded URL is what replay targets — both the HTTP Repeater and
+    // WebSocket replay derive their destination from it. Dropping the port
+    // would silently redirect a replay of an :8443 capture to 443.
+    expect(resolveMitmTarget('api.example.com', 8443, '/v1').url).toBe(
+      'https://api.example.com:8443/v1',
+    );
+    expect(resolveMitmTarget('api.example.com', 443, '/v1').url).toBe(
+      'https://api.example.com/v1',
+    );
+  });
 });
 
 describe('handleExchange', () => {
