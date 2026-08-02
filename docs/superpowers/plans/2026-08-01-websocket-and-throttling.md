@@ -1471,9 +1471,16 @@ useEffect(() => {
   getThrottle().then(setThrottleState).catch(() => setThrottleState(null));
 }, []);
 
-/** Which preset key the current settings correspond to, or 'off'. */
+/**
+ * Which preset key the current settings correspond to.
+ * Returns 'unknown' when state has not loaded (or the fetch failed), 'off' when
+ * throttling is confirmed disabled, a preset key on an exact match, or 'custom'.
+ * 'unknown' must NOT collapse into 'off': claiming "disabled" when the real state
+ * is unknown misreports it, exactly as misreporting a custom rate as 'off' would.
+ */
 function activePreset(state: ThrottleState | null): string {
-  if (!state || !state.settings.enabled) return 'off';
+  if (!state) return 'unknown';
+  if (!state.settings.enabled) return 'off';
   const match = Object.entries(state.presets).find(
     ([, p]) =>
       p.downKbps === state.settings.downKbps &&
