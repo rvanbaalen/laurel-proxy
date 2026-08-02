@@ -71,14 +71,17 @@ export function parseRateOption(value: string | undefined, label: string): numbe
   return num;
 }
 
+/** Output formats accepted by `throttle`, matching the project-wide convention (see requests.ts). */
+export const VALID_THROTTLE_FORMATS = ['json', 'table', 'agent'] as const;
+
 /**
  * Reports a failure respecting --format. Plain text on stderr for humans;
- * a JSON object on stdout for `--format json` callers (scripts, AI agents)
- * so they always get parseable output, success or failure, without having
- * to special-case stderr scraping.
+ * a JSON object on stdout for `--format json`/`--format agent` callers
+ * (scripts, AI agents) so they always get parseable output, success or
+ * failure, without having to special-case stderr scraping.
  */
 function reportError(message: string, format: string): void {
-  if (format === 'json') {
+  if (format === 'json' || format === 'agent') {
     console.log(JSON.stringify({ error: message }));
   } else {
     console.error(message);
@@ -93,12 +96,11 @@ export function registerThrottle(program: Command): void {
     .option('--up <kbps>', 'Upstream bandwidth in kbps')
     .option('--latency <ms>', 'Added latency in milliseconds')
     .option('--status', 'Show current throttle settings')
-    .option('--format <format>', 'Output format (json|table)', 'table')
+    .option('--format <format>', 'Output format (json|table|agent)', 'table')
     .option('--ui-port <number>', 'UI/API port', '8081')
     .action(async (preset: string | undefined, opts) => {
-      const validFormats = ['json', 'table'];
-      if (!validFormats.includes(opts.format)) {
-        console.error(`Invalid format "${opts.format}". Valid formats: ${validFormats.join(', ')}`);
+      if (!(VALID_THROTTLE_FORMATS as readonly string[]).includes(opts.format)) {
+        console.error(`Invalid format "${opts.format}". Valid formats: ${VALID_THROTTLE_FORMATS.join(', ')}`);
         process.exit(1);
         return;
       }

@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { parseRateOption } from './throttle.js';
+import { parseRateOption, VALID_THROTTLE_FORMATS } from './throttle.js';
 
 describe('parseRateOption', () => {
   it('returns undefined when the option was not supplied', () => {
@@ -29,5 +29,18 @@ describe('parseRateOption', () => {
 
   it('demonstrates why the check matters: NaN round-trips through JSON as null', () => {
     expect(JSON.stringify({ downKbps: Number('abc') })).toBe('{"downKbps":null}');
+  });
+});
+
+describe('VALID_THROTTLE_FORMATS', () => {
+  it('accepts agent alongside json and table', () => {
+    // `agent` is a first-class output mode project-wide (see requests.ts and
+    // the dedicated agent branches in format.ts) — `laurel-proxy throttle
+    // 3g --format agent` must not be rejected the way an actually-invalid
+    // format like `yaml` is.
+    expect(VALID_THROTTLE_FORMATS).toContain('agent');
+    expect(VALID_THROTTLE_FORMATS).toContain('json');
+    expect(VALID_THROTTLE_FORMATS).toContain('table');
+    expect(VALID_THROTTLE_FORMATS).not.toContain('yaml');
   });
 });

@@ -276,4 +276,31 @@ describe('formatThrottleSettings', () => {
       expect(out).toContain(name);
     }
   });
+
+  it('emits a compact agent record when enabled', () => {
+    const out = formatThrottleSettings(
+      { enabled: true, downKbps: 780, upKbps: 330, latencyMs: 100 },
+      THROTTLE_PRESETS,
+      'agent',
+    );
+    const parsed = JSON.parse(out);
+    expect(parsed).toEqual({
+      enabled: true,
+      down_kbps: 780,
+      up_kbps: 330,
+      latency_ms: 100,
+      available_presets: Object.keys(THROTTLE_PRESETS),
+    });
+  });
+
+  it('emits a compact agent record when disabled', () => {
+    const out = formatThrottleSettings(
+      { enabled: false, downKbps: 0, upKbps: 0, latencyMs: 0 },
+      THROTTLE_PRESETS,
+      'agent',
+    );
+    const parsed = JSON.parse(out);
+    expect(parsed.enabled).toBe(false);
+    expect(parsed.available_presets).toEqual(Object.keys(THROTTLE_PRESETS));
+  });
 });

@@ -411,6 +411,16 @@ export function formatThrottleSettings(
     return JSON.stringify({ settings, presets }, null, 2);
   }
 
+  if (format === 'agent') {
+    return JSON.stringify({
+      enabled: settings.enabled,
+      down_kbps: settings.downKbps,
+      up_kbps: settings.upKbps,
+      latency_ms: settings.latencyMs,
+      available_presets: Object.keys(presets),
+    });
+  }
+
   const presetNames = Object.keys(presets).join(', ');
 
   if (!settings.enabled) {
