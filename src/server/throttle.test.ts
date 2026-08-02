@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from 'vitest';
-import { RateLimiter, Throttler, THROTTLE_PRESETS, kbpsToBytesPerSec } from './throttle.js';
+import { RateLimiter, Throttler, THROTTLE_PRESETS, kbpsToBytesPerSec, validateThrottleSettings } from './throttle.js';
 import type { Clock } from './throttle.js';
 
 /**
@@ -27,6 +27,55 @@ describe('kbpsToBytesPerSec', () => {
   it('converts kilobits per second to bytes per second', () => {
     expect(kbpsToBytesPerSec(8)).toBe(1000);
     expect(kbpsToBytesPerSec(1000)).toBe(125_000);
+  });
+
+  it('treats a non-finite rate as unlimited rather than passing NaN on', () => {
+    // Defence in depth behind `validateThrottleSettings`. NaN fails every
+    // comparison, so the old `kbps <= 0` guard let it through and returned NaN;
+    // `RateLimiter` then short-circuited on `Math.ceil(NaN) > 0` and paced
+    // nothing, while the settings it was built from still read "enabled".
+    // Returning 0 makes that state an honestly unlimited limiter.
+    expect(kbpsToBytesPerSec(NaN)).toBe(0);
+    expect(kbpsToBytesPerSec(Infinity)).toBe(0);
+    expect(kbpsToBytesPerSec(-Infinity)).toBe(0);
+  });
+});
+
+describe('validateThrottleSettings', () => {
+  const fallback = { enabled: false, downKbps: 0, upKbps: 0, latencyMs: 0 };
+
+  it('accepts a complete, valid object', () => {
+    expect(validateThrottleSettings({ enabled: true, downKbps: 1, upKbps: 2, latencyMs: 3 }, fallback))
+      .toEqual({ settings: { enabled: true, downKbps: 1, upKbps: 2, latencyMs: 3 } });
+  });
+
+  it('fills absent fields from the fallback', () => {
+    expect(validateThrottleSettings({ downKbps: 500 }, { ...fallback, enabled: true, latencyMs: 7 }))
+      .toEqual({ settings: { enabled: true, downKbps: 500, upKbps: 0, latencyMs: 7 } });
+  });
+
+  it('treats an explicit null as an absent field, never as a rate', () => {
+    // `??` semantics, matching the endpoint's documented "omitted fields fall
+    // back to the current setting" — a JSON `null` is how plenty of clients spell
+    // "not set". The property that matters is that it cannot become a rate: the
+    // result is a finite fallback value that the settings then report honestly,
+    // not a NaN the limiter would silently ignore while claiming to be enabled.
+    const result = validateThrottleSettings({ enabled: true, downKbps: null }, fallback);
+    expect(result).toEqual({ settings: { enabled: true, downKbps: 0, upKbps: 0, latencyMs: 0 } });
+  });
+
+  it('rejects the inputs that made the config file lie about being enabled', () => {
+    for (const input of [
+      { enabled: 'false' },
+      { enabled: true, upKbps: 'fast' },
+      { enabled: true, latencyMs: NaN },
+      { enabled: true, downKbps: Infinity },
+      { enabled: true, downKbps: -1 },
+      { enabled: true, downKbps: { not: 'a number' } },
+    ]) {
+      const result = validateThrottleSettings(input, fallback);
+      expect(result, JSON.stringify(input)).toHaveProperty('error');
+    }
   });
 });
 

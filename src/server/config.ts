@@ -2,7 +2,9 @@ import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
 import type { Config, ThrottleSettings } from '../shared/types.js';
-import { DEFAULT_CONFIG } from '../shared/types.js';
+import { DEFAULT_CONFIG, DEFAULT_THROTTLE } from '../shared/types.js';
+import { validateThrottleSettings } from './throttle.js';
+import type { ThrottleSettingsInput } from './throttle.js';
 
 function expandHome(filePath: string): string {
   if (filePath.startsWith('~')) {
@@ -43,6 +45,28 @@ function parseDuration(value: string): number {
   return num * (multipliers[unit] || 1);
 }
 
+/**
+ * Validates the config file's `throttle` block, falling back to
+ * `DEFAULT_THROTTLE` on anything it cannot trust.
+ *
+ * `PUT /api/throttle` has type-checked these fields since the fix that stopped
+ * `"false"` from silently enabling throttling; the config file — which
+ * `docs/throttling.md` documents as a user-facing surface — had no equivalent and
+ * copied `raw.throttle` straight through. A `NaN` or `null` rate then reached the
+ * limiter, which short-circuits on it, leaving traffic completely unthrottled
+ * while `GET /api/throttle` and the UI pill both reported enabled.
+ *
+ * Falling back wholesale rather than field by field: a block that contains one
+ * unusable value is not a block whose other values have earned trust, and
+ * "throttling off" is the one outcome that cannot silently misreport itself.
+ */
+function parseFileThrottle(raw: unknown): ThrottleSettings | undefined {
+  if (raw === undefined) return undefined;
+  if (raw === null || typeof raw !== 'object' || Array.isArray(raw)) return DEFAULT_THROTTLE;
+  const result = validateThrottleSettings(raw as ThrottleSettingsInput, DEFAULT_THROTTLE);
+  return 'error' in result ? DEFAULT_THROTTLE : result.settings;
+}
+
 export function loadConfig(cliFlags: Partial<Config> = {}): Config {
   let fileConfig: Partial<Config> = {};
 
@@ -58,7 +82,7 @@ export function loadConfig(cliFlags: Partial<Config> = {}): Config {
         maxDbSize: typeof raw.maxDbSize === 'string' ? parseSize(raw.maxDbSize) : raw.maxDbSize,
         maxBodySize: typeof raw.maxBodySize === 'string' ? parseSize(raw.maxBodySize) : raw.maxBodySize,
         certCacheSize: raw.certCacheSize,
-        throttle: raw.throttle,
+        throttle: parseFileThrottle(raw.throttle),
       };
       for (const key of Object.keys(fileConfig) as (keyof Config)[]) {
         if (fileConfig[key] === undefined) delete fileConfig[key];

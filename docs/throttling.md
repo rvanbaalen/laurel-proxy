@@ -68,6 +68,23 @@ Set `LAUREL_PROXY_CONFIG` to point config I/O at a different file (used by the t
 suite to avoid touching a developer's real config; also handy for running multiple
 proxy instances with independent settings).
 
+### The config file's `throttle` block is validated on load
+
+A hand-edited `throttle` block goes through the same validation as `PUT /api/throttle`
+— `enabled` must be a boolean, and `downKbps`/`upKbps`/`latencyMs` must each be finite
+and non-negative. Anything else (`"enabled": "false"`, `"downKbps": "fast"`,
+`1e999`, a negative rate, or a `throttle` value that is not an object) makes the whole
+block fall back to the disabled default rather than being partly applied.
+
+Omitted fields — and fields written as `null` — fall back to the default for that
+field, matching the endpoint's merge semantics, so `{"throttle": {"enabled": true}}`
+means "enabled with no rate limits" rather than an error.
+
+This closes a gap where an unvalidated rate could reach the limiter as `NaN`: the
+limiter short-circuits on it, so traffic passed at full speed while
+`GET /api/throttle` and the web UI's throttle pill both reported throttling as
+enabled.
+
 ## Shared-pipe semantics
 
 Throttling models **one shared virtual link per direction**, not one per connection.

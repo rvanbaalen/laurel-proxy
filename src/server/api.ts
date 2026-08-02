@@ -12,7 +12,8 @@ import { replayWebSocket, recordToWsReplayRequest, isReplayableFrame } from './w
 import type { WsReplayFrame, WsReplayRequest } from '../shared/types.js';
 import { enableSystemProxy, disableSystemProxy, checkSystemProxyStatus } from '../cli/system-proxy.js';
 import type { Throttler } from './throttle.js';
-import { THROTTLE_PRESETS } from './throttle.js';
+import { THROTTLE_PRESETS, validateThrottleSettings } from './throttle.js';
+import type { ThrottleSettingsInput } from './throttle.js';
 import { saveThrottleSettings } from './config.js';
 import type { ThrottleSettings } from '../shared/types.js';
 
@@ -221,13 +222,13 @@ export function createApiRouter(
     }
 
     const body = req.body as ThrottlePutBody;
-    let settings: ThrottleSettings;
+    let candidate: ThrottleSettingsInput;
 
     if (body.preset != null) {
       // A preset takes precedence over any explicit rate fields present in
       // the same body — it fully replaces the settings rather than merging.
       if (body.preset === 'off') {
-        settings = { enabled: false, downKbps: 0, upKbps: 0, latencyMs: 0 };
+        candidate = { enabled: false, downKbps: 0, upKbps: 0, latencyMs: 0 };
       } else {
         const preset = typeof body.preset === 'string' ? THROTTLE_PRESETS[body.preset] : undefined;
         if (!preset) {
@@ -236,29 +237,21 @@ export function createApiRouter(
           });
           return;
         }
-        settings = { enabled: true, ...preset };
+        candidate = { enabled: true, ...preset };
       }
     } else {
-      const current = throttler.getSettings();
-      const enabled = body.enabled ?? current.enabled;
-      if (typeof enabled !== 'boolean') {
-        res.status(400).json({ error: 'enabled must be a boolean' });
-        return;
-      }
-      settings = {
-        enabled,
-        downKbps: (body.downKbps ?? current.downKbps) as number,
-        upKbps: (body.upKbps ?? current.upKbps) as number,
-        latencyMs: (body.latencyMs ?? current.latencyMs) as number,
-      };
+      candidate = body;
     }
 
-    for (const key of ['downKbps', 'upKbps', 'latencyMs'] as const) {
-      if (!Number.isFinite(settings[key]) || settings[key] < 0) {
-        res.status(400).json({ error: `${key} must be a non-negative number` });
-        return;
-      }
+    // One validator, shared with the config-file loader. A preset is a
+    // compile-time constant and cannot fail this, but routing it through anyway
+    // keeps a single point where settings become trusted.
+    const validated = validateThrottleSettings(candidate, throttler.getSettings());
+    if ('error' in validated) {
+      res.status(400).json({ error: validated.error });
+      return;
     }
+    const settings: ThrottleSettings = validated.settings;
 
     // Nothing above mutates live state: a rejected request must leave both
     // the running throttler and the persisted config untouched. Persist

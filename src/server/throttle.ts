@@ -11,8 +11,68 @@ export const realClock: Clock = {
   sleep: (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
 };
 
+/** A candidate settings object from any untrusted surface: request body or config file. */
+export interface ThrottleSettingsInput {
+  enabled?: unknown;
+  downKbps?: unknown;
+  upKbps?: unknown;
+  latencyMs?: unknown;
+}
+
+/**
+ * The one place throttle settings coming from outside the process are checked.
+ *
+ * Both `PUT /api/throttle` and the config file feed the same live `Throttler`,
+ * and only the endpoint used to validate. The config file — a documented,
+ * user-facing surface — copied its `throttle` block through untouched, so
+ * `{"enabled": true, "downKbps": null}` (`null` coerces to 0 in arithmetic but
+ * survives `?? current`) or a hand-written `NaN`-producing value reached
+ * `kbpsToBytesPerSec`, whose `<= 0` guard is false for NaN. `Math.ceil(NaN) > 0`
+ * is also false, so `RateLimiter` short-circuited: traffic completely
+ * unthrottled while `GET /api/throttle` and the UI pill both reported enabled.
+ *
+ * Shared rather than reimplemented on purpose. A second copy of this logic is
+ * exactly how the two surfaces came to disagree, and a second copy is what a
+ * future change would have to remember to update twice.
+ *
+ * Absent fields fall back rather than failing: that is the endpoint's documented
+ * merge semantics ("omitted fields fall back to the current setting"), and the
+ * loader passes `DEFAULT_THROTTLE` as the fallback so a partial config block
+ * means the same thing.
+ */
+export function validateThrottleSettings(
+  input: ThrottleSettingsInput,
+  fallback: ThrottleSettings,
+): { settings: ThrottleSettings } | { error: string } {
+  const enabled = input.enabled ?? fallback.enabled;
+  if (typeof enabled !== 'boolean') {
+    return { error: 'enabled must be a boolean' };
+  }
+
+  const rates: Record<'downKbps' | 'upKbps' | 'latencyMs', number> = {
+    downKbps: 0, upKbps: 0, latencyMs: 0,
+  };
+  for (const key of ['downKbps', 'upKbps', 'latencyMs'] as const) {
+    const value = input[key] ?? fallback[key];
+    // `Number.isFinite` rejects NaN, ±Infinity, and every non-number (a numeric
+    // string included — "500" is a typo, not a rate, and accepting it here would
+    // make the two surfaces disagree again).
+    if (!Number.isFinite(value) || (value as number) < 0) {
+      return { error: `${key} must be a non-negative number` };
+    }
+    rates[key] = value as number;
+  }
+
+  return { settings: { enabled, ...rates } };
+}
+
 export function kbpsToBytesPerSec(kbps: number): number {
-  if (kbps <= 0) return 0;
+  // `!Number.isFinite` rather than `<= 0` alone: NaN fails every comparison, so
+  // a NaN rate would return NaN, and `Math.ceil(NaN) > 0` is false — the limiter
+  // would then wait for nothing on every chunk, i.e. no throttling at all while
+  // the settings say otherwise. Validation should keep NaN out; this makes the
+  // failure mode a disabled limiter rather than a lying one if it ever gets in.
+  if (!Number.isFinite(kbps) || kbps <= 0) return 0;
   // Clamp to at least 1 B/s. RateLimiter treats 0 as "unlimited", so rounding a
   // small-but-nonzero rate down to 0 would turn a very slow link into an
   // unthrottled one — the exact opposite of what was configured.
