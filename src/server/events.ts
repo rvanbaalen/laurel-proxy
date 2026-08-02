@@ -1,4 +1,4 @@
-import type { RequestRecord } from '../shared/types.js';
+import type { RequestRecord, WebSocketMessage } from '../shared/types.js';
 
 export interface StatusEvent {
   running: boolean;
@@ -7,10 +7,12 @@ export interface StatusEvent {
 
 type RequestSubscriber = (events: RequestRecord[]) => void;
 type StatusSubscriber = (status: StatusEvent) => void;
+type WsMessageSubscriber = (messages: WebSocketMessage[]) => void;
 
 export class EventManager {
   private requestSubscribers: Set<RequestSubscriber> = new Set();
   private statusSubscribers: Set<StatusSubscriber> = new Set();
+  private wsSubscribers: Set<WsMessageSubscriber> = new Set();
   private buffer: RequestRecord[] = [];
   private timer: ReturnType<typeof setTimeout> | null = null;
 
@@ -18,6 +20,17 @@ export class EventManager {
     this.buffer.push(record);
     if (!this.timer) {
       this.timer = setTimeout(() => this.flush(), 100);
+    }
+  }
+
+  /**
+   * Delivered immediately rather than buffered like requests: each call already
+   * carries the frames decoded from one relayed chunk, so it is a batch.
+   */
+  pushWsMessages(messages: WebSocketMessage[]): void {
+    if (messages.length === 0) return;
+    for (const sub of this.wsSubscribers) {
+      try { sub(messages); } catch {}
     }
   }
 
@@ -47,11 +60,17 @@ export class EventManager {
     return () => { this.statusSubscribers.delete(fn); };
   }
 
+  subscribeWsMessages(fn: WsMessageSubscriber): () => void {
+    this.wsSubscribers.add(fn);
+    return () => { this.wsSubscribers.delete(fn); };
+  }
+
   stop(): void {
     if (this.timer) {
       clearTimeout(this.timer);
       this.timer = null;
     }
     this.buffer = [];
+    this.wsSubscribers.clear();
   }
 }
