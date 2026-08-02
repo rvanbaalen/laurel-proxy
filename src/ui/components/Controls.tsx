@@ -88,6 +88,7 @@ export function Controls({ onClear, statusEvent, activeView, onViewChange, repea
   const [customError, setCustomError] = useState<string | null>(null);
   const [customSubmitting, setCustomSubmitting] = useState(false);
   const customPopoverRef = useRef<HTMLDivElement>(null);
+  const customToggleRef = useRef<HTMLButtonElement>(null);
   const firstCustomInputRef = useRef<HTMLInputElement>(null);
 
   const openCustomPopover = () => {
@@ -108,7 +109,12 @@ export function Controls({ onClear, statusEvent, activeView, onViewChange, repea
       if (e.key === 'Escape') setCustomOpen(false);
     };
     const onClickOutside = (e: MouseEvent) => {
-      if (customPopoverRef.current && !customPopoverRef.current.contains(e.target as Node)) {
+      const target = e.target as Node;
+      // The toggle button must be excluded too. Otherwise mousedown closes the
+      // popover, then the button's click handler sees customOpen === false and
+      // immediately reopens it — so the button could never close what it opened.
+      if (customToggleRef.current?.contains(target)) return;
+      if (customPopoverRef.current && !customPopoverRef.current.contains(target)) {
         setCustomOpen(false);
       }
     };
@@ -211,6 +217,7 @@ export function Controls({ onClear, statusEvent, activeView, onViewChange, repea
         </select>
 
         <button
+          ref={customToggleRef}
           type="button"
           onClick={() => (customOpen ? setCustomOpen(false) : openCustomPopover())}
           aria-haspopup="dialog"

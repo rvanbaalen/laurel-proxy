@@ -290,7 +290,10 @@ describe('parseThrottleInputs', () => {
     expect(result).toEqual({ values: { downKbps: 12.5, upKbps: 0, latencyMs: 0 } });
   });
 
-  it('trims surrounding whitespace', () => {
+  // Note: this documents that padded input is accepted, not that we trim it —
+  // Number(' 500 ') is already 500, so this passes with or without a .trim()
+  // call. The load-bearing whitespace case is the all-blank field below.
+  it('accepts a field padded with whitespace', () => {
     const result = parseThrottleInputs(' 500 ', '100', '200');
     expect(result).toEqual({ values: { downKbps: 500, upKbps: 100, latencyMs: 200 } });
   });
