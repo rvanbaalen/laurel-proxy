@@ -31,7 +31,7 @@ npx laurel-proxy requests --tail
 ## Why Laurel Proxy?
 
 - **AI-native.** A `--format agent` output mode returns enriched JSON optimized for LLM consumption. A Claude Code plugin teaches your AI assistant every command and API endpoint.
-- **One command.** `npx @rvanbaalen/laurel-proxy` starts the proxy, enables system routing, and opens an interactive TUI. Ctrl+C to clean up.
+- **One command.** `npx laurel-proxy` starts the proxy, enables system routing, and opens an interactive TUI. Ctrl+C to clean up.
 - **SQLite storage.** All traffic in a queryable database. Filter by host, status, method, time range. JSON output for piping.
 - **HTTPS interception.** Local CA, per-domain cert generation, one command to trust.
 - **Smart filters.** `--failed` for 4xx/5xx, `--last-hour`, `--last-day`, `--slow 500` for requests over 500ms.
