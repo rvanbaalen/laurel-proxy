@@ -118,3 +118,33 @@ export interface ReplayResponse {
   duration: number;
   size: number;
 }
+
+export interface WsReplayFrame {
+  opcode: 'text' | 'binary';
+  /** base64-encoded */
+  payload: string;
+  /** milliseconds to wait after the previous frame */
+  delayMs: number;
+}
+
+export interface WsReplayRequest {
+  url: string;
+  frames: WsReplayFrame[];
+  timeoutMs?: number;
+}
+
+export interface WsReplayResponse {
+  /** Frames handed to the socket before the replay ended. */
+  sentCount: number;
+  /**
+   * Server frames, in arrival order. `payload` is base64 for both opcodes,
+   * matching `GET /api/requests/:id/messages`. `offsetMs` is measured from the
+   * start of the replay, so it includes connection setup.
+   */
+  received: { opcode: 'text' | 'binary'; payload: string; offsetMs: number }[];
+  durationMs: number;
+  /** The close code, when the connection closed before the replay ended. */
+  closeCode: number | null;
+  /** Present only when the replay failed or timed out. */
+  error?: string;
+}

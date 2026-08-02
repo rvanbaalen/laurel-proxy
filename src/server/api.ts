@@ -8,6 +8,8 @@ import type { RequestFilter, RequestRecord, WebSocketMessage } from '../shared/t
 import type { CertificateAuthority } from './ssl.js';
 import type { ReplayRequest } from '../shared/types.js';
 import { replay } from './replay.js';
+import { replayWebSocket, recordToWsReplayRequest } from './ws-replay.js';
+import type { WsReplayFrame, WsReplayRequest } from '../shared/types.js';
 import { enableSystemProxy, disableSystemProxy, checkSystemProxyStatus } from '../cli/system-proxy.js';
 import type { Throttler } from './throttle.js';
 import { THROTTLE_PRESETS } from './throttle.js';
@@ -54,6 +56,30 @@ function parsePositiveInt(raw: unknown, fallback: number): number | null {
   if (raw === undefined) return fallback;
   const n = Number(raw);
   return Number.isInteger(n) && n >= 0 ? n : null;
+}
+
+/** Recorded frames a single replay will read out of a connection. */
+const MAX_REPLAY_FRAMES = 10_000;
+
+/**
+ * Validates and normalises client-supplied replay frames.
+ *
+ * Malformed frames are rejected here rather than left to fail mid-send: a bad
+ * base64 payload or a missing opcode would otherwise come back as a 200 whose
+ * `error` field blames the connection for a client mistake. Returns null when
+ * the input is not a usable frame list.
+ */
+function parseWsReplayFrames(raw: unknown): WsReplayFrame[] | null {
+  if (!Array.isArray(raw)) return null;
+  const frames: WsReplayFrame[] = [];
+  for (const frame of raw as Partial<WsReplayFrame>[]) {
+    if (frame?.opcode !== 'text' && frame?.opcode !== 'binary') return null;
+    if (typeof frame.payload !== 'string') return null;
+    const delayMs = frame.delayMs ?? 0;
+    if (!Number.isFinite(delayMs) || delayMs < 0) return null;
+    frames.push({ opcode: frame.opcode, payload: frame.payload, delayMs });
+  }
+  return frames;
 }
 
 export interface ProxyControl {
@@ -286,6 +312,62 @@ export function createApiRouter(
       } else {
         res.status(502).json({ error: message });
       }
+    }
+  });
+
+  router.post('/websocket/replay', async (req: Request, res: Response) => {
+    const body = req.body as Partial<WsReplayRequest> & { requestId?: string };
+
+    if (body.timeoutMs !== undefined
+      && (typeof body.timeoutMs !== 'number' || !Number.isFinite(body.timeoutMs) || body.timeoutMs <= 0)) {
+      res.status(400).json({ error: 'timeoutMs must be a positive number' });
+      return;
+    }
+
+    // Both discriminators are type-checked, not just truthiness: a non-string
+    // id would reach better-sqlite3 as an unbindable value, and a non-string
+    // url would reach replayWebSocket's startsWith as a TypeError.
+    let replayRequest: WsReplayRequest;
+    if (typeof body.requestId === 'string' && body.requestId) {
+      const record = db.getById(body.requestId);
+      if (!record) {
+        res.status(404).json({ error: 'Not found' });
+        return;
+      }
+      if (record.kind !== 'websocket') {
+        res.status(400).json({ error: 'Request is not a WebSocket connection' });
+        return;
+      }
+      const messages = db.getWebSocketMessages(body.requestId, MAX_REPLAY_FRAMES, 0);
+      // Refused rather than replayed in part: silently resending a prefix of a
+      // conversation would look like a completed replay. The count is of every
+      // recorded frame, both directions, so this is conservative — a refused
+      // connection might still have had few enough client frames to fit.
+      if (messages.total > messages.data.length) {
+        res.status(400).json({
+          error: `Connection has ${messages.total} recorded frames; replay handles at most ${MAX_REPLAY_FRAMES}`,
+        });
+        return;
+      }
+      replayRequest = { ...recordToWsReplayRequest(record, messages.data), timeoutMs: body.timeoutMs };
+    } else if (typeof body.url === 'string' && body.url) {
+      const frames = parseWsReplayFrames(body.frames);
+      if (!frames) {
+        res.status(400).json({
+          error: 'Each frame needs an opcode of "text" or "binary", a base64 payload string, and a non-negative delayMs',
+        });
+        return;
+      }
+      replayRequest = { url: body.url, frames, timeoutMs: body.timeoutMs };
+    } else {
+      res.status(400).json({ error: 'Provide either requestId, or url and frames' });
+      return;
+    }
+
+    try {
+      res.json(await replayWebSocket(replayRequest));
+    } catch (err) {
+      res.status(400).json({ error: (err as Error).message });
     }
   });
 

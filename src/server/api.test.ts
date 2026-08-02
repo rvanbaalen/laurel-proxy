@@ -8,6 +8,7 @@ import { EventManager } from './events.js';
 import { Throttler } from './throttle.js';
 import { getConfigPath } from './config.js';
 import type { RequestRecord, WebSocketMessage } from '../shared/types.js';
+import { startRawWsServer, echoHandler } from '../../tests/helpers/ws-server.js';
 import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
@@ -278,6 +279,117 @@ describe('REST API', () => {
     expect(body.limit).toBe(0);
     expect(body.total).toBe(1);
     expect(body.data).toEqual([]);
+  });
+
+  it('POST /api/websocket/replay replays a recorded connection by id', async () => {
+    const server = await startRawWsServer({ onMessage: echoHandler });
+    try {
+      db.insert(makeRequest({
+        id: 'ws-replay',
+        kind: 'websocket',
+        status: 101,
+        url: `http://127.0.0.1:${server.port}/live`,
+      }));
+      db.insertWebSocketMessages([
+        { id: 'r1', request_id: 'ws-replay', timestamp: 1000, direction: 'sent',
+          opcode: 'text', payload: Buffer.from('one'), size: 3, truncated: 0 },
+        // Neither of these is resent: replay drives the client half only.
+        { id: 'r2', request_id: 'ws-replay', timestamp: 1000, direction: 'received',
+          opcode: 'text', payload: Buffer.from('re:one'), size: 6, truncated: 0 },
+        { id: 'r3', request_id: 'ws-replay', timestamp: 1010, direction: 'sent',
+          opcode: 'ping', payload: null, size: 0, truncated: 0 },
+      ]);
+
+      const res = await httpReq(port, '/api/websocket/replay', 'POST', { requestId: 'ws-replay' });
+      expect(res.status).toBe(200);
+      const body = JSON.parse(res.body);
+      expect(body.error).toBeUndefined();
+      expect(body.sentCount).toBe(1);
+      expect(body.received.map((r: { payload: string }) =>
+        Buffer.from(r.payload, 'base64').toString())).toEqual(['re:one']);
+    } finally {
+      server.close();
+    }
+  }, 20_000);
+
+  it('POST /api/websocket/replay accepts an explicit url and frames', async () => {
+    const server = await startRawWsServer({ onMessage: echoHandler });
+    try {
+      const res = await httpReq(port, '/api/websocket/replay', 'POST', {
+        url: `ws://127.0.0.1:${server.port}/adhoc`,
+        frames: [{ opcode: 'text', payload: Buffer.from('hi').toString('base64'), delayMs: 0 }],
+        timeoutMs: 5000,
+      });
+      expect(res.status).toBe(200);
+      const body = JSON.parse(res.body);
+      expect(body.sentCount).toBe(1);
+      expect(Buffer.from(body.received[0].payload, 'base64').toString()).toBe('re:hi');
+    } finally {
+      server.close();
+    }
+  }, 20_000);
+
+  it('POST /api/websocket/replay refuses a connection with more frames than it can replay', async () => {
+    db.insert(makeRequest({ id: 'ws-huge', kind: 'websocket', status: 101 }));
+    // One past the 10 000-frame ceiling. Replaying the first 10 000 and
+    // reporting success would misrepresent what was sent.
+    db.insertWebSocketMessages(Array.from({ length: 10_001 }, (_, i) => ({
+      id: `h${i}`, request_id: 'ws-huge', timestamp: 1000 + i, direction: 'sent' as const,
+      opcode: 'text' as const, payload: Buffer.from('x'), size: 1, truncated: 0,
+    })));
+
+    const res = await httpReq(port, '/api/websocket/replay', 'POST', { requestId: 'ws-huge' });
+    expect(res.status).toBe(400);
+    expect(JSON.parse(res.body).error).toMatch(/10001 recorded frames/);
+  }, 20_000);
+
+  it('POST /api/websocket/replay returns 404 for an unknown requestId', async () => {
+    const res = await httpReq(port, '/api/websocket/replay', 'POST', { requestId: 'nope' });
+    expect(res.status).toBe(404);
+    // The endpoint's own 404, not Express's route-miss page.
+    expect(JSON.parse(res.body).error).toBe('Not found');
+  });
+
+  it('POST /api/websocket/replay refuses a request that is not a websocket', async () => {
+    db.insert(makeRequest({ id: 'plain-http' }));
+    const res = await httpReq(port, '/api/websocket/replay', 'POST', { requestId: 'plain-http' });
+    expect(res.status).toBe(400);
+    expect(JSON.parse(res.body).error).toMatch(/not a WebSocket/i);
+  });
+
+  it('POST /api/websocket/replay requires either a requestId or url and frames', async () => {
+    const res = await httpReq(port, '/api/websocket/replay', 'POST', {});
+    expect(res.status).toBe(400);
+  });
+
+  it('POST /api/websocket/replay rejects a non-ws url', async () => {
+    const res = await httpReq(port, '/api/websocket/replay', 'POST', {
+      url: 'https://example.com/x',
+      frames: [],
+    });
+    expect(res.status).toBe(400);
+    expect(JSON.parse(res.body).error).toMatch(/ws:\/\//);
+  });
+
+  it('POST /api/websocket/replay rejects a malformed frame instead of reporting a send failure', async () => {
+    const res = await httpReq(port, '/api/websocket/replay', 'POST', {
+      url: 'ws://127.0.0.1:1/x',
+      frames: [{ opcode: 'text' }],
+    });
+    expect(res.status).toBe(400);
+    expect(JSON.parse(res.body).error).toMatch(/frame/i);
+  });
+
+  it('POST /api/websocket/replay rejects a non-numeric timeoutMs rather than timing out at once', async () => {
+    // setTimeout(NaN) fires immediately, which would surface a client mistake as
+    // a 200 carrying "Replay timed out".
+    const res = await httpReq(port, '/api/websocket/replay', 'POST', {
+      url: 'ws://127.0.0.1:1/x',
+      frames: [],
+      timeoutMs: 'soon',
+    });
+    expect(res.status).toBe(400);
+    expect(JSON.parse(res.body).error).toMatch(/timeoutMs/);
   });
 
   it('DELETE /api/requests clears all', async () => {
