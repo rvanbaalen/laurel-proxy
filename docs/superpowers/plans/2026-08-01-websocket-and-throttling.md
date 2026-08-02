@@ -1445,7 +1445,24 @@ export async function setThrottle(
 
 - [ ] **Step 2: Add the control**
 
-In `src/ui/components/Controls.tsx`, add a preset `<select>` beside the existing controls. Load current state on mount, write on change, and show the active rate as a label. Match the existing Tailwind class conventions in that file:
+`Controls.tsx` is a single dense toolbar row (`h-12`, `flex items-center gap-3`)
+containing: logo, a status pill, a System Proxy pill, the filter input, a
+`ViewToggle`, then Clear / CA Cert buttons. The throttle control belongs **next to
+the System Proxy pill**, since both are global proxy-behaviour toggles.
+
+Follow that file's actual conventions, which differ from the server code:
+
+- **Imports use `.ts` extensions**, e.g. `from '../client.ts'` — not `.js`. This is a
+  Vite-resolved UI module; do not "correct" it to `.js`.
+- State is local `useState` + `useEffect`, loaded via a `client.ts` function, with
+  `.catch(() => {})` so a failed fetch degrades quietly rather than breaking the bar.
+- Styling is inline Tailwind utility strings using the project's semantic tokens
+  (`bg-bg-secondary`, `text-text-muted`, `border-border`, `text-accent`,
+  `border-accent/20`, `bg-accent/10`). Reuse them; do not introduce raw colours.
+- Interactive pills carry a `title` attribute explaining current state.
+
+Implement a `<select>` styled as a pill to match the neighbouring buttons, because
+seven options (off + six presets) is too many to cycle through on click:
 
 ```tsx
 const [throttle, setThrottleState] = useState<ThrottleState | null>(null);
@@ -1454,14 +1471,48 @@ useEffect(() => {
   getThrottle().then(setThrottleState).catch(() => setThrottleState(null));
 }, []);
 
+/** Which preset key the current settings correspond to, or 'off'. */
+function activePreset(state: ThrottleState | null): string {
+  if (!state || !state.settings.enabled) return 'off';
+  const match = Object.entries(state.presets).find(
+    ([, p]) =>
+      p.downKbps === state.settings.downKbps &&
+      p.upKbps === state.settings.upKbps &&
+      p.latencyMs === state.settings.latencyMs,
+  );
+  return match ? match[0] : 'custom';
+}
+
 async function onPresetChange(preset: string) {
-  const settings = await setThrottle({ preset });
-  setThrottleState((prev) => (prev ? { ...prev, settings } : prev));
+  try {
+    const settings = await setThrottle({ preset });
+    setThrottleState((prev) => (prev ? { ...prev, settings } : prev));
+  } catch {
+    // Leave the previous state visible rather than showing a false value.
+  }
 }
 ```
 
-Render an `off` option plus one option per preset key, with `value` selected from
-`throttle.settings.enabled` and the matching preset rates.
+Render an `off` option plus one option per preset key. When `activePreset` returns
+`'custom'` (settings set via CLI or API that match no preset), include a disabled
+`custom` option and select it — the UI must never misreport a custom rate as `off` or
+as some preset it isn't.
+
+Apply the accent treatment (`bg-accent/10 text-accent border-accent/20`) when
+throttling is enabled and the muted treatment when off, matching the System Proxy
+pill, so an active throttle is visible at a glance.
+
+- [ ] **Step 2b: Indicate that throttling inflates recorded durations**
+
+Throttling is applied inside the exchange pipeline before the response is recorded,
+so `duration` on a throttled request includes the simulated delay. A developer
+reading the traffic list would otherwise mistake simulated slowness for real upstream
+slowness.
+
+Add a visible cue while throttling is enabled — extend the pill's `title` to say
+durations include simulated delay, and surface a short note in the traffic view
+(for example next to the duration column header, or as a one-line banner). Keep it
+minimal; the requirement is that the inflation is discoverable, not prominent.
 
 - [ ] **Step 3: Verify in the browser**
 
