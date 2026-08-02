@@ -3,7 +3,7 @@ import https from 'node:https';
 import { randomUUID } from 'node:crypto';
 import { URL } from 'node:url';
 import { waitForDrain } from './stream-utils.js';
-import { recordSafely } from './recording-safety.js';
+import { recordSafely } from '../shared/recording-safety.js';
 import type { Config, RequestRecord } from '../shared/types.js';
 import type { Throttler } from './throttle.js';
 

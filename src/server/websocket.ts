@@ -5,7 +5,7 @@ import { randomUUID } from 'node:crypto';
 import { WsFrameDecoder } from './ws-frames.js';
 import type { WsMessage } from './ws-frames.js';
 import { waitForDrain } from './stream-utils.js';
-import { recordSafely } from './recording-safety.js';
+import { recordSafely } from '../shared/recording-safety.js';
 import type { ExchangeTarget } from './exchange.js';
 import type { Throttler, RateLimiter } from './throttle.js';
 import type { Config, RequestRecord, WebSocketMessage } from '../shared/types.js';

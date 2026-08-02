@@ -6,7 +6,7 @@ import type { CertificateAuthority } from './ssl.js';
 import type { EventManager } from './events.js';
 import type { Config, RequestRecord, WebSocketMessage } from '../shared/types.js';
 import { listenWithRetry } from './port-utils.js';
-import { recordSafely } from './recording-safety.js';
+import { recordSafely } from '../shared/recording-safety.js';
 import { handleExchange, resolveHttpTarget, resolveMitmTarget } from './exchange.js';
 import type { ExchangeDeps } from './exchange.js';
 import { handleWebSocketUpgrade } from './websocket.js';
