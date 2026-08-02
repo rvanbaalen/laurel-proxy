@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { activePreset, escapeWsControlChars, formatWsPayload, describeReplayOutcome, mergeWsMessages, parseThrottleInputs } from './client.ts';
+import { activePreset, escapeWsControlChars, formatWsPayload, describeReplayOutcome, mergeWsMessages, parseThrottleInputs, recordKind } from './client.ts';
 import type { ThrottleState, WsOpcode, WsReplayResponse, UiWsMessage } from './client.ts';
 
 function b64(s: string): string {
@@ -323,5 +323,23 @@ describe('parseThrottleInputs', () => {
   it('checks fields in down/up/latency order, reporting the first failure', () => {
     const result = parseThrottleInputs('-1', '-2', '-3');
     expect(result).toEqual({ error: 'downKbps must be a non-negative number' });
+  });
+});
+
+describe('recordKind', () => {
+  it('reports "websocket" only for the literal kind "websocket"', () => {
+    expect(recordKind({ kind: 'websocket' })).toBe('websocket');
+  });
+
+  it('treats a legacy null kind (pre-migration row) as "http", not "unknown"', () => {
+    expect(recordKind({ kind: null })).toBe('http');
+  });
+
+  it('treats a missing kind field as "http"', () => {
+    expect(recordKind({})).toBe('http');
+  });
+
+  it('treats an explicit "http" kind as "http"', () => {
+    expect(recordKind({ kind: 'http' })).toBe('http');
   });
 });

@@ -1,8 +1,10 @@
 interface FilterBarProps {
   statuses: Set<string>;
   methods: Set<string>;
+  kinds: Set<string>;
   onToggleStatus: (s: string) => void;
   onToggleMethod: (m: string) => void;
+  onToggleKind: (k: string) => void;
   onClearFilters: () => void;
   matchCount: number;
   totalCount: number;
@@ -11,6 +13,7 @@ interface FilterBarProps {
 
 const STATUS_CHIPS = ['2xx', '4xx', '5xx'] as const;
 const METHOD_CHIPS = ['GET', 'POST', 'PUT', 'DELETE'] as const;
+const KIND_CHIPS = ['WS'] as const;
 
 function Chip({ label, active, onClick }: { label: string; active: boolean; onClick: () => void }) {
   return (
@@ -28,11 +31,11 @@ function Chip({ label, active, onClick }: { label: string; active: boolean; onCl
 }
 
 export function FilterBar({
-  statuses, methods,
-  onToggleStatus, onToggleMethod, onClearFilters,
+  statuses, methods, kinds,
+  onToggleStatus, onToggleMethod, onToggleKind, onClearFilters,
   matchCount, totalCount, errorCount,
 }: FilterBarProps) {
-  const hasFilters = statuses.size > 0 || methods.size > 0;
+  const hasFilters = statuses.size > 0 || methods.size > 0 || kinds.size > 0;
 
   return (
     <div className="flex items-center gap-2 px-4 py-1.5 border-b border-border-subtle bg-bg-primary overflow-x-auto">
@@ -49,6 +52,12 @@ export function FilterBar({
 
       {METHOD_CHIPS.map(m => (
         <Chip key={m} label={m} active={methods.has(m)} onClick={() => onToggleMethod(m)} />
+      ))}
+
+      <div className="w-px h-4 bg-border shrink-0" />
+
+      {KIND_CHIPS.map(k => (
+        <Chip key={k} label={k} active={kinds.has(k)} onClick={() => onToggleKind(k)} />
       ))}
 
       <div className="ml-auto flex items-center gap-3 text-[11px] font-mono text-text-muted shrink-0">

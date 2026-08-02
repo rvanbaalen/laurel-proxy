@@ -185,6 +185,21 @@ export function parseThrottleInputs(
   return { values };
 }
 
+/**
+ * Normalizes a record's `kind` to a definite category. `kind` is optional,
+ * and legacy rows captured before the WebSocket migration read back as
+ * `null` or `undefined` rather than `'http'` (see `RequestFilter.kind` in
+ * `src/shared/types.ts` for the server-side version of this same rule).
+ * Anything other than the literal `'websocket'` counts as `'http'` —
+ * deliberately, so a legacy row is never miscategorised as "unknown" or
+ * shown as a WebSocket connection it isn't. Shared by the traffic list's
+ * inline WS marker and the filter bar's WS chip so the two can't disagree
+ * about what counts as a WebSocket row.
+ */
+export function recordKind(record: { kind?: RequestRecord['kind'] | null }): 'http' | 'websocket' {
+  return record.kind === 'websocket' ? 'websocket' : 'http';
+}
+
 export function activePreset(state: ThrottleState | null): string {
   if (!state) return 'unknown';
   if (!state.settings.enabled) return 'off';

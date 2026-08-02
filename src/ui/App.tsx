@@ -6,7 +6,7 @@ import { RequestDetail } from './components/RequestDetail.tsx';
 import { ResizeHandle } from './components/ResizeHandle.tsx';
 import { Repeater, createTab } from './components/Repeater.tsx';
 import type { RepeaterTabData } from './components/Repeater.tsx';
-import { useSSE } from './client.ts';
+import { useSSE, recordKind } from './client.ts';
 
 const FAVICON_RUNNING = `data:image/svg+xml,${encodeURIComponent('<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32"><rect width="32" height="32" rx="7" fill="#0a0a0a"/><circle cx="16" cy="16" r="4" fill="#22c55e"><animate attributeName="opacity" values="1;0.4;1" dur="2s" repeatCount="indefinite"/></circle><circle cx="16" cy="16" r="7" fill="none" stroke="#22c55e" stroke-width="1.5" opacity="0.2"><animate attributeName="r" values="7;10;7" dur="2s" repeatCount="indefinite"/><animate attributeName="opacity" values="0.2;0;0.2" dur="2s" repeatCount="indefinite"/></circle></svg>')}`;
 
@@ -27,6 +27,7 @@ export function App() {
 
   const [filterStatuses, setFilterStatuses] = useState<Set<string>>(new Set());
   const [filterMethods, setFilterMethods] = useState<Set<string>>(new Set());
+  const [filterKinds, setFilterKinds] = useState<Set<string>>(new Set());
   const [filterSearch, setFilterSearch] = useState('');
 
   const searchRef = useRef<HTMLInputElement>(null);
@@ -35,7 +36,7 @@ export function App() {
   const filteredRequests = useMemo(() => {
     const search = filterSearch.toLowerCase();
 
-    if (filterStatuses.size === 0 && filterMethods.size === 0 && !search) return liveRequests;
+    if (filterStatuses.size === 0 && filterMethods.size === 0 && filterKinds.size === 0 && !search) return liveRequests;
 
     return liveRequests.filter((r) => {
       if (filterStatuses.size > 0) {
@@ -48,10 +49,17 @@ export function App() {
         if (!matchesAny) return false;
       }
       if (filterMethods.size > 0 && !filterMethods.has(r.method)) return false;
+      if (filterKinds.size > 0) {
+        const matchesAny = Array.from(filterKinds).some(kind => {
+          if (kind === 'WS') return recordKind(r) === 'websocket';
+          return false;
+        });
+        if (!matchesAny) return false;
+      }
       if (search && !r.url.toLowerCase().includes(search)) return false;
       return true;
     });
-  }, [liveRequests, filterStatuses, filterMethods, filterSearch]);
+  }, [liveRequests, filterStatuses, filterMethods, filterKinds, filterSearch]);
 
   const errorCount = useMemo(() => liveRequests.filter(r => r.status != null && r.status >= 400).length, [liveRequests]);
 
@@ -81,9 +89,18 @@ export function App() {
     });
   }, []);
 
+  const toggleKind = useCallback((k: string) => {
+    setFilterKinds(prev => {
+      const next = new Set(prev);
+      if (next.has(k)) next.delete(k); else next.add(k);
+      return next;
+    });
+  }, []);
+
   const clearFilters = useCallback(() => {
     setFilterStatuses(new Set());
     setFilterMethods(new Set());
+    setFilterKinds(new Set());
     setFilterSearch('');
   }, []);
 
@@ -130,8 +147,10 @@ export function App() {
           <FilterBar
             statuses={filterStatuses}
             methods={filterMethods}
+            kinds={filterKinds}
             onToggleStatus={toggleStatus}
             onToggleMethod={toggleMethod}
+            onToggleKind={toggleKind}
             onClearFilters={clearFilters}
             matchCount={filteredRequests.length}
             totalCount={liveRequests.length}

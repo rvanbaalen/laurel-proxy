@@ -15,10 +15,17 @@ afterward is decoded and stored.
   - `--format agent` and `--format json` carry a top-level `kind` field, on both
     `laurel-proxy requests` and `laurel-proxy requests --tail`.
   - `laurel-proxy request <id>` shows a `Kind` line.
+  - The web UI's traffic list tags the row's method cell with a small `WS` badge,
+    the same "only non-HTTP rows are marked, no extra column" approach as the CLI
+    table. A `null`/`undefined` `kind` (a legacy pre-migration row) counts as HTTP
+    and is left unmarked, matching `recordKind` in `src/ui/client.ts`.
   - Filter either way with `laurel-proxy requests --kind websocket` (or
     `--kind http`), which works on `--tail` too, and with
     `GET /api/requests?kind=websocket`. An unrecognised kind is an error rather
-    than an ignored filter.
+    than an ignored filter. The web UI's filter bar has a client-side `WS` chip
+    that filters the already-loaded traffic list the same way its status/method
+    chips do — it does not call `?kind=` on the server, so it composes with the
+    other chips and `matchCount`/`totalCount` exactly like they do.
 
   Finding the id to pass to `laurel-proxy messages` is therefore a one-liner:
 

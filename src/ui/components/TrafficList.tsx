@@ -1,6 +1,6 @@
 import { useState, useMemo, useCallback, useRef } from 'react';
 import { CaretUp, CaretDown, CaretUpDown } from '@phosphor-icons/react';
-import { useThrottle } from '../client.ts';
+import { useThrottle, recordKind } from '../client.ts';
 import type { RequestRecord } from '../client.ts';
 
 interface TrafficListProps {
@@ -79,7 +79,19 @@ const renderCell = (req: RequestRecord, key: SortKey) => {
     case 'timestamp':
       return <span className="font-mono text-text-muted text-[11px] tabular-nums">{formatTimestamp(req.timestamp)}</span>;
     case 'method':
-      return <span className={`font-mono text-[11px] font-semibold ${methodColor(req.method)}`}>{req.method}</span>;
+      return (
+        <span className={`font-mono text-[11px] font-semibold ${methodColor(req.method)}`}>
+          {recordKind(req) === 'websocket' && (
+            <span
+              className="mr-1 px-1 py-px rounded-sm text-[9px] font-bold border bg-accent/10 text-accent border-accent/20"
+              title="WebSocket connection"
+            >
+              WS
+            </span>
+          )}
+          {req.method}
+        </span>
+      );
     case 'status':
       return <span className={`font-mono text-[11px] ${statusColor(req.status)}`}>{req.status ?? '-'}</span>;
     case 'host':
