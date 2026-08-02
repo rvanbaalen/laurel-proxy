@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeAll, afterAll } from 'vitest';
+import { describe, it, expect, beforeAll, beforeEach, afterAll } from 'vitest';
 import path from 'node:path';
 import os from 'node:os';
 import fs from 'node:fs';
@@ -46,7 +46,17 @@ describe('laurel-proxy throttle CLI transport', () => {
     else process.env.LAUREL_PROXY_CONFIG = originalConfigEnv;
   });
 
-  it('GET reports the default disabled state', async () => {
+  // Every test in this file shares one server, so throttle state applied by one
+  // is still live for the next. Resetting here rather than relying on whichever
+  // test happens to run last is what makes each test independent of order: with
+  // a trailing `update()` doing the job instead, this file failed under
+  // `--sequence.shuffle` as soon as a fourth test was added.
+  beforeEach(async () => {
+    const reset = await api(uiPort, 'PUT', '/api/throttle', { preset: 'off' });
+    expect(reset.status).toBe(200);
+  });
+
+  it('GET reports the disabled state, and the preset catalogue alongside it', async () => {
     const initial = await api(uiPort, 'GET', '/api/throttle');
     expect(initial.status).toBe(200);
     expect((initial.body.settings as ThrottleSettings).enabled).toBe(false);

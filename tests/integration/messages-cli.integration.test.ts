@@ -46,16 +46,25 @@ function startEchoServer(): Promise<{ server: http.Server; port: number }> {
   });
 }
 
-/** Opens a WS connection through the proxy and returns once the 101 upgrade lands. */
+/**
+ * Opens a WS connection through the proxy and returns once the 101 upgrade lands.
+ *
+ * `path` is a required argument rather than a fixed `/socket`: every test in this
+ * file writes into one shared database, so a connection has to be identifiable
+ * afterwards by something other than "the only websocket row there is". A
+ * per-test path is what lets an assertion be scoped to the connection the test
+ * itself opened, instead of counting rows a later test also contributes to.
+ */
 function openWsThroughProxy(
   proxyPort: number,
   targetPort: number,
+  path: string,
 ): Promise<{ socket: net.Socket; send: (text: string) => void }> {
   return new Promise((resolve, reject) => {
     const req = http.request({
       host: '127.0.0.1',
       port: proxyPort,
-      path: `http://127.0.0.1:${targetPort}/socket`,
+      path: `http://127.0.0.1:${targetPort}${path}`,
       headers: {
         host: `127.0.0.1:${targetPort}`,
         Connection: 'Upgrade',
@@ -130,7 +139,7 @@ describe('laurel-proxy messages CLI transport', () => {
   it(
     'reads captured frames straight from the database while the proxy is still running',
     async () => {
-      const { socket, send } = await openWsThroughProxy(proxyPort, echo.port);
+      const { socket, send } = await openWsThroughProxy(proxyPort, echo.port, '/direct-read');
       const decoder = new WsFrameDecoder();
       const received: string[] = [];
       await new Promise<void>((resolve) => {
@@ -154,7 +163,14 @@ describe('laurel-proxy messages CLI transport', () => {
       // writer's connection.
       const db = new Database(dbPath);
       try {
-        const rows = db.query({ limit: 200 }).data.filter((r) => r.kind === 'websocket');
+        // Scoped to the connection this test opened. Counting every websocket row
+        // in the file made the assertion depend on running first: the later
+        // --follow test opens two more connections into the same database, so
+        // under `--sequence.shuffle` this read found 3 rows and failed on a
+        // number that was never this test's business.
+        const rows = db
+          .query({ limit: 200 })
+          .data.filter((r) => r.kind === 'websocket' && r.path === '/direct-read');
         expect(rows).toHaveLength(1);
         const record = db.getById(rows[0].id);
         expect(record?.kind).toBe('websocket');
@@ -198,7 +214,7 @@ describe('laurel-proxy messages CLI transport', () => {
 
       // Opened first, and left alone for the rest of the test: its frames
       // must never show up in the tracked connection's --follow output.
-      const { socket: unrelatedSocket, send: sendUnrelated } = await openWsThroughProxy(proxyPort, echo.port);
+      const { socket: unrelatedSocket, send: sendUnrelated } = await openWsThroughProxy(proxyPort, echo.port, '/unrelated');
 
       const { socket: trackedSocket, send: sendTracked } = await openTrackedConnection();
       const requestId = await idPromise;
