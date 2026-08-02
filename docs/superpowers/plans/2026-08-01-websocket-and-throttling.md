@@ -3598,3 +3598,89 @@ git commit -m "docs: document WebSocket capture and bandwidth throttling"
   invalid upstream certificates, hiding real TLS misconfigurations from the developer.
   Charles verifies upstream certs and surfaces failures. Changing it is a behaviour
   change with its own test matrix, so it does not belong in this plan.
+
+---
+
+## Task 15: Make the recording boundary total
+
+**Added mid-execution**, not part of the original plan. Task 9's re-review traced every
+recording concern back toward the relay and the process and found the invariant does
+not hold end to end. `websocket.ts` is now clean, but three paths remain where a
+*recording* failure kills the process or a live connection.
+
+The invariant this task completes: **a recording failure may lose a recording, but must
+never affect the bytes an application sees, nor terminate the process.** Laurel is a
+debugging tool; crashing the developer's proxy because a database insert failed is a
+worse outcome than losing a row.
+
+**Files:**
+- Modify: `src/server/proxy.ts`, `src/server/exchange.ts`, `src/server/websocket.ts`
+- Test: `src/server/proxy.test.ts`, `src/server/exchange.test.ts`, `tests/integration/websocket.integration.test.ts`
+
+### The three paths
+
+**1. `proxy.ts` `flushWrites` — the most realistic, fix first.**
+
+It runs from a `setInterval` and calls `db.insertBatch` / `db.insertWebSocketMessages`
+unguarded. A throw inside a timer callback is an uncaught exception, so the process
+dies. Unlike the other two this is reachable in ordinary use, not just in theory:
+`SQLITE_FULL` on a full disk, a locked database, a corrupted file, or a failed
+migration all throw here. A developer's proxy dying because their disk filled up is a
+bug they will hit.
+
+Guard it, and **drop the batch rather than retrying** — an un-insertable batch retried
+forever would grow the queue without bound and convert a transient failure into a
+permanent one.
+
+**2. `exchange.ts` `onRecord` — same severity, primary HTTP path.**
+
+`handleExchange` is invoked as `void handleExchange(...)`. Node 22 defaults to
+`--unhandled-rejections=throw`, and this repo installs no `unhandledRejection` or
+`uncaughtException` handler, so a throw from `onRecord` terminates the process. Task 9's
+implementer skipped this believing an unhandled rejection was less severe than an
+uncaught exception; on Node 22 it is not.
+
+**3. `websocket.ts` body capture inside the relay loop's `try`.**
+
+`captured.push(slice)` and the `capturedLength` bookkeeping sit inside the loop whose
+`catch` destroys the client socket, so a capture throw would abort a live transfer. Not
+reachable today given the `maxBodySize` cap, but it is the same inversion the round
+just eliminated elsewhere.
+
+### Two structural gaps from Task 9's own fix
+
+**4. Record objects are constructed outside the guard they're passed to.** At the two
+`recordSafely` call sites the argument expressions — `JSON.stringify(upstreamRes.headers)`,
+`(upstreamRes.headers['content-type'] || '').split(';')[0].trim()` — evaluate *before*
+`recordSafely` is entered, as do the two `new WsFrameDecoder()` calls in `makeObserver`.
+None can throw today, which makes the boundary incidentally rather than structurally
+total. Move construction inside the guard.
+
+**5. No committed regression test for the throw boundary.** `observeSafely` and
+`recordSafely` are verified only by ad-hoc falsification; nothing in the suite fails if a
+future edit inlines them back. Add tests that inject a deliberately throwing
+`onMessages` and `onRecord` via `deps` and assert the connection survives and the
+process does not die.
+
+### Approach
+
+- [ ] **Step 1:** Write failing tests first for each of the five items. For 1 and 2 the
+      shape is: inject a `db`/`onRecord` that throws, drive traffic, assert the process
+      survives and the client still gets a correct response. For 3, a throwing capture
+      path. For 5, throwing `onMessages`/`onRecord` through `deps`.
+- [ ] **Step 2:** Verify each test fails for the expected reason before fixing.
+- [ ] **Step 3:** Apply the guards. Prefer one small named helper over five inline
+      `try {} catch {}` blocks, so the intent is greppable — Task 9 established
+      `observeSafely`/`recordSafely` in `websocket.ts`; consider whether they belong in
+      `stream-utils.ts` (or a new `recording-safety.ts`) now that three modules need them.
+      Watch for the `exchange.ts` ⇄ `websocket.ts` cycle: `stream-utils.ts` is a leaf
+      module and is the safe home.
+- [ ] **Step 4:** Falsify each guard: remove it, confirm RED, restore, confirm GREEN.
+- [ ] **Step 5:** Run the full suite plus both typecheck projects. Commit.
+
+### Explicitly out of scope
+
+Surfacing degraded recordings to the user. There is still no schema field meaning "this
+recording is incomplete", and adding one is a feature. That remains the consolidated
+follow-up covering Task 1's missing `error` column and Task 7's unsurfaced decoder
+`isFailed`.
