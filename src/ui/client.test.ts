@@ -163,6 +163,8 @@ describe('describeReplayOutcome', () => {
   function response(overrides: Partial<WsReplayResponse>): WsReplayResponse {
     return {
       sentCount: 1,
+      frameCount: 1,
+      sentAll: true,
       received: [],
       durationMs: 100,
       closeCode: null,
@@ -207,6 +209,31 @@ describe('describeReplayOutcome', () => {
     const r = response({ stoppedBecause: 'close', closeCode: 1006 });
     const outcome = describeReplayOutcome(r);
     expect(outcome.summary).toContain('1006');
+  });
+
+  it('never reports an incomplete send as success, whatever ended the replay', () => {
+    // The close path can end a replay mid-send: the server closes after the
+    // first of three frames and `stoppedBecause` is still 'close'. Reporting
+    // that as success is this project's dominant defect class — partial work
+    // rendered green — in the one surface a person actually reads.
+    const r = response({ stoppedBecause: 'close', sentCount: 1, frameCount: 3, sentAll: false, closeCode: 1000 });
+    const outcome = describeReplayOutcome(r);
+    expect(outcome.level).not.toBe('success');
+    // How far it got has to be in the text, not just in the level: "something
+    // went wrong" without "1 of 3 frames" leaves the reader unable to tell a
+    // half-sent conversation from a connection that never opened.
+    expect(outcome.summary).toContain('1');
+    expect(outcome.summary).toContain('3');
+    expect(outcome.summary.toLowerCase()).toMatch(/incomplete|only|before/);
+    // The close code stays visible — it is what says whether the peer closed or
+    // the connection was cut.
+    expect(outcome.summary).toContain('1000');
+  });
+
+  it('does not demote a replay that had no frames to send', () => {
+    // A "reconnect and listen" replay sent everything it was asked to send.
+    const r = response({ stoppedBecause: 'close', sentCount: 0, frameCount: 0, sentAll: true });
+    expect(describeReplayOutcome(r).level).toBe('success');
   });
 
   it('does not mention a close code when none was recorded', () => {

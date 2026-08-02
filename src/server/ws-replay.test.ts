@@ -212,6 +212,80 @@ describe('replayWebSocket', () => {
     }
   }, 20_000);
 
+  it('reports a close that cut the send short as an incomplete replay', async () => {
+    // The close path can still end a replay mid-send, and until `sentAll` there
+    // was no field that said so: `stoppedBecause: 'close'` with a short
+    // `sentCount` reads exactly like a clean run, and the web UI rendered it
+    // green. Both existing close-path tests use `frames: []`, which is precisely
+    // why this went unnoticed — so this one sends several.
+    const closeFrame = encodeFrame('close', Buffer.from([0x03, 0xe8]));
+    const server = await startRawWsServer({
+      onMessage: (_message, socket) => { socket.write(closeFrame); socket.end(); },
+    });
+    try {
+      const result = await replayWebSocket({
+        url: `ws://127.0.0.1:${server.port}/s`,
+        frames: [
+          { opcode: 'text', payload: Buffer.from('one').toString('base64'), delayMs: 0 },
+          // Long enough that the close cannot be mistaken for scheduling slack:
+          // the connection is gone well before either of these is due.
+          { opcode: 'text', payload: Buffer.from('two').toString('base64'), delayMs: 600 },
+          { opcode: 'text', payload: Buffer.from('three').toString('base64'), delayMs: 600 },
+        ],
+        timeoutMs: 10_000,
+      });
+
+      expect(result.stoppedBecause).toBe('close');
+      expect(result.sentCount).toBe(1);
+      // The two fields that make "I stopped before sending everything"
+      // expressible at all, rather than something a caller must infer by
+      // re-counting the frames it passed in.
+      expect(result.frameCount).toBe(3);
+      expect(result.sentAll).toBe(false);
+    } finally {
+      server.close();
+    }
+  }, 20_000);
+
+  it('reports a completed send as complete, so an incomplete one is distinguishable', async () => {
+    const server = await startRawWsServer({ onMessage: echoHandler });
+    try {
+      const result = await replayWebSocket({
+        url: `ws://127.0.0.1:${server.port}/s`,
+        frames: [
+          { opcode: 'text', payload: Buffer.from('alpha').toString('base64'), delayMs: 0 },
+          { opcode: 'text', payload: Buffer.from('beta').toString('base64'), delayMs: 10 },
+        ],
+        timeoutMs: 5000,
+      });
+
+      expect(result.sentCount).toBe(2);
+      expect(result.frameCount).toBe(2);
+      expect(result.sentAll).toBe(true);
+    } finally {
+      server.close();
+    }
+  }, 15_000);
+
+  it('counts a replay with nothing to send as a complete send', async () => {
+    // `frames: []` is the shape both older close-path tests use, and a replay
+    // that was asked to send nothing did send everything — it must not be
+    // demoted, or every "just reconnect and listen" replay would read as broken.
+    const server = await startRawWsServer({ onOpen: (socket) => socket.destroy() });
+    try {
+      const result = await replayWebSocket({
+        url: `ws://127.0.0.1:${server.port}/s`,
+        frames: [],
+        timeoutMs: 10_000,
+      });
+
+      expect(result.frameCount).toBe(0);
+      expect(result.sentAll).toBe(true);
+    } finally {
+      server.close();
+    }
+  }, 20_000);
+
   it('reports an abrupt disconnect as an abnormal close', async () => {
     // No close handshake at all. Node's WebSocket reports this as close 1006
     // without an error event, so `stoppedBecause` is 'close' and the code is

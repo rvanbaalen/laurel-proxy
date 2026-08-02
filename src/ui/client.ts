@@ -261,6 +261,10 @@ export type WsReplayStopReason = 'idle' | 'close' | 'timeout' | 'error';
 export interface WsReplayResponse {
   /** Frames handed to the socket before the replay ended. */
   sentCount: number;
+  /** Frames the replay was asked to send, so `sentCount` has a denominator. */
+  frameCount: number;
+  /** False when the replay stopped before every requested frame went out. */
+  sentAll: boolean;
   /** Server frames, in arrival order. `payload` is base64 for both opcodes. */
   received: { opcode: 'text' | 'binary'; payload: string; offsetMs: number }[];
   durationMs: number;
@@ -378,11 +382,25 @@ export interface WsReplayOutcome {
  * treated as success. closeCode is surfaced whenever present, since on an
  * abrupt disconnect (1006, no error event) it's the only signal that
  * distinguishes "closed" from "cut".
+ *
+ * An incomplete send outranks `stoppedBecause` entirely. A server that closes
+ * after the first of three frames stops the replay with `'close'`, and reading
+ * only that reason renders a 1-of-3 replay as a green success — partial work
+ * reported as complete, in the surface a person actually looks at. `sentAll` is
+ * checked first, and the count is put in the text so the reader can see how far
+ * it got rather than only that something was wrong.
  */
 export function describeReplayOutcome(response: WsReplayResponse): WsReplayOutcome {
   const closeSuffix = response.closeCode !== null ? ` (close code ${response.closeCode})` : '';
   const replyCount = response.received.length;
   const replyNote = `${replyCount} repl${replyCount === 1 ? 'y' : 'ies'} received`;
+
+  if (!response.sentAll) {
+    return {
+      level: 'error',
+      summary: `Replay incomplete: only ${response.sentCount} of ${response.frameCount} frames were sent before the replay stopped (${response.stoppedBecause})${closeSuffix}.${response.error ? ` ${response.error}` : ''} ${replyNote}.`,
+    };
+  }
 
   switch (response.stoppedBecause) {
     case 'close':

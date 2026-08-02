@@ -73,6 +73,12 @@ export function recordToWsReplayRequest(
  * The returned promise rejects only for a URL that is not a WebSocket URL.
  * Every network outcome resolves, carrying `error` when something went wrong,
  * so a caller always learns how many frames actually went out.
+ *
+ * `stoppedBecause` alone cannot say whether the replay finished its job: the
+ * close path can end it mid-send, and `'close'` with a short `sentCount` looks
+ * exactly like a clean run. `sentAll` and `frameCount` are reported for that
+ * reason — an incomplete send is a fact about the replay, not something a caller
+ * should have to reconstruct by re-counting the frames it passed in.
  */
 export function replayWebSocket(request: WsReplayRequest): Promise<WsReplayResponse> {
   if (!request.url.startsWith('ws://') && !request.url.startsWith('wss://')) {
@@ -109,6 +115,11 @@ export function replayWebSocket(request: WsReplayRequest): Promise<WsReplayRespo
       try { socket.close(); } catch { /* already closing or closed */ }
       resolve({
         sentCount,
+        frameCount: request.frames.length,
+        // Derived from the counts rather than from `sendingComplete`, so a
+        // replay with nothing to send is complete even when the socket never
+        // opened — `frames: []` did send everything it was asked to.
+        sentAll: sentCount === request.frames.length,
         received,
         durationMs: Date.now() - startedAt,
         closeCode,

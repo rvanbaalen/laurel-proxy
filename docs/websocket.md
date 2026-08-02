@@ -160,6 +160,21 @@ legitimately had nothing more to say. Anything consuming a replay result must no
 read "no `error` field" as "the replay succeeded and captured everything." Check
 `received` and `sentCount` too.
 
+**`'close'` is not a success signal on its own either.** A server that closes the
+connection after the first of three frames stops the replay with
+`stoppedBecause: 'close'` and a `sentCount` of 1 — a partial replay that reads
+exactly like a clean one. Two fields make that visible without re-counting the
+frames you passed in:
+
+| Field        | Meaning |
+| ------------ | ------- |
+| `frameCount` | Frames the replay was asked to send. |
+| `sentAll`    | `false` when it stopped before all of them went out. |
+
+`sentAll: false` means the replay did not do what was asked, whatever
+`stoppedBecause` says. The web UI treats it as a failure and reports
+"only N of M frames were sent" rather than a green success.
+
 ### Known replay limitations
 
 - **Non-UTF-8 text frames can't round-trip.** A recorded `text` frame is resent via

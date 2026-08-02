@@ -144,6 +144,19 @@ export type WsReplayStopReason = 'idle' | 'close' | 'timeout' | 'error';
 export interface WsReplayResponse {
   /** Frames handed to the socket before the replay ended. */
   sentCount: number;
+  /** Frames the replay was asked to send, so `sentCount` has a denominator. */
+  frameCount: number;
+  /**
+   * Whether every requested frame went out.
+   *
+   * `stoppedBecause` cannot answer this on its own: a server that closes after
+   * the first of three frames stops the replay with `'close'` and a `sentCount`
+   * of 1, which is indistinguishable from a clean run unless the caller
+   * re-counts the frames it passed in. Anything reporting a verdict on a replay
+   * must consult this before calling the result a success — a partial send
+   * reported as success is the failure this field exists to make impossible.
+   */
+  sentAll: boolean;
   /**
    * Server frames, in arrival order. `payload` is base64 for both opcodes,
    * matching `GET /api/requests/:id/messages`. `offsetMs` is measured from the
