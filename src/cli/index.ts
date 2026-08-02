@@ -12,6 +12,7 @@ import { registerProxyOn } from './commands/proxy-on.js';
 import { registerProxyOff } from './commands/proxy-off.js';
 import { registerReplay } from './commands/replay.js';
 import { registerThrottle } from './commands/throttle.js';
+import { registerMessages } from './commands/messages.js';
 
 const program = new Command();
 program
@@ -40,5 +41,6 @@ registerProxyOn(program);
 registerProxyOff(program);
 registerReplay(program);
 registerThrottle(program);
+registerMessages(program);
 
 program.parse();

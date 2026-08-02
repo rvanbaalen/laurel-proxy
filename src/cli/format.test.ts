@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
-import { formatRequests, formatRequest, formatTailLine, formatReplayResponse, formatDiff, formatThrottleSettings } from './format.js';
-import type { RequestRecord, PaginatedResponse, ReplayResponse } from '../shared/types.js';
+import { formatRequests, formatRequest, formatTailLine, formatReplayResponse, formatDiff, formatThrottleSettings, formatWsMessages, formatWsMessageLine } from './format.js';
+import type { RequestRecord, PaginatedResponse, ReplayResponse, WebSocketMessage } from '../shared/types.js';
 import { THROTTLE_PRESETS } from '../server/throttle.js';
 
 function makeRequest(overrides: Partial<RequestRecord> = {}): RequestRecord {
@@ -302,5 +302,162 @@ describe('formatThrottleSettings', () => {
     const parsed = JSON.parse(out);
     expect(parsed.enabled).toBe(false);
     expect(parsed.available_presets).toEqual(Object.keys(THROTTLE_PRESETS));
+  });
+});
+
+// ── formatWsMessages / formatWsMessageLine ──
+
+function wsMessage(over: Partial<WebSocketMessage> = {}): WebSocketMessage {
+  return {
+    id: 'm1', request_id: 'c1', timestamp: 1735689600000, direction: 'sent',
+    opcode: 'text', payload: Buffer.from('{"op":1}'), size: 8, truncated: 0, ...over,
+  };
+}
+
+describe('formatWsMessages', () => {
+  it('renders direction arrows in table format', () => {
+    const out = formatWsMessages(
+      { data: [wsMessage(), wsMessage({ id: 'm2', direction: 'received' })], total: 2, limit: 500, offset: 0 },
+      'table',
+    );
+    expect(out).toContain('→');
+    expect(out).toContain('←');
+  });
+
+  it('emits parseable JSON with decoded text payloads', () => {
+    const out = formatWsMessages(
+      { data: [wsMessage()], total: 1, limit: 500, offset: 0 },
+      'json',
+    );
+    expect(JSON.parse(out).data[0].payload).toBe('{"op":1}');
+  });
+
+  it('reports an empty connection', () => {
+    const out = formatWsMessages({ data: [], total: 0, limit: 500, offset: 0 }, 'table');
+    expect(out).toContain('No messages');
+  });
+
+  it('marks binary payloads by size rather than dumping bytes', () => {
+    const out = formatWsMessages(
+      { data: [wsMessage({ opcode: 'binary', payload: Buffer.alloc(64), size: 64 })], total: 1, limit: 500, offset: 0 },
+      'table',
+    );
+    expect(out).toContain('binary');
+    expect(out).toContain('64');
+  });
+
+  it('tags text payloads as utf8 and binary payloads as base64 in json format', () => {
+    const out = formatWsMessages(
+      {
+        data: [
+          wsMessage({ id: 'm1', opcode: 'text' }),
+          wsMessage({ id: 'm2', opcode: 'binary', payload: Buffer.from([0, 1, 2]), size: 3 }),
+        ],
+        total: 2, limit: 500, offset: 0,
+      },
+      'json',
+    );
+    const parsed = JSON.parse(out);
+    expect(parsed.data[0].payload_encoding).toBe('utf8');
+    expect(parsed.data[1].payload_encoding).toBe('base64');
+    expect(parsed.data[1].payload).toBe(Buffer.from([0, 1, 2]).toString('base64'));
+  });
+
+  it('treats ping/pong/close control frames as opaque bytes, not text', () => {
+    // RFC 6455 control frames carry arbitrary application data (ping/pong) or
+    // a binary status code (close) — decoding them as UTF-8 can produce
+    // mojibake or silently mangle non-UTF-8 bytes, the same failure mode the
+    // brief already flagged for 'binary'. They must be base64, and the table
+    // preview must not attempt to decode them either.
+    for (const opcode of ['ping', 'pong', 'close'] as const) {
+      const jsonOut = formatWsMessages(
+        { data: [wsMessage({ opcode, payload: Buffer.from([0xff, 0x00, 0x10]), size: 3 })], total: 1, limit: 500, offset: 0 },
+        'json',
+      );
+      const parsed = JSON.parse(jsonOut);
+      expect(parsed.data[0].payload_encoding).toBe('base64');
+
+      const tableOut = formatWsMessages(
+        { data: [wsMessage({ opcode, payload: Buffer.from([0xff, 0x00, 0x10]), size: 3 })], total: 1, limit: 500, offset: 0 },
+        'table',
+      );
+      expect(tableOut).toContain('3 bytes');
+    }
+  });
+
+  it('escapes control characters in the table preview instead of printing them raw', () => {
+    // An embedded ESC (0x1b) could otherwise inject an ANSI escape sequence
+    // into the terminal, and an embedded newline would break the
+    // one-line-per-message layout this formatter promises.
+    const payload = Buffer.from('before\x1b[31mred\nafter');
+    const out = formatWsMessages(
+      { data: [wsMessage({ payload, size: payload.length })], total: 1, limit: 500, offset: 0 },
+      'table',
+    );
+    // eslint-disable-next-line no-control-regex
+    expect(/[\x00-\x08\x0b\x0c\x0e-\x1f]/.test(out.replace(/\x1b\[[0-9;]*m/g, ''))).toBe(false);
+    expect(out).toContain('before');
+    expect(out).toContain('after');
+  });
+
+  it('includes a human-readable summary in agent format', () => {
+    const out = formatWsMessages(
+      { data: [wsMessage(), wsMessage({ id: 'm2', direction: 'received' })], total: 2, limit: 500, offset: 0 },
+      'agent',
+    );
+    const parsed = JSON.parse(out);
+    expect(parsed.summary).toContain('2 message');
+    expect(parsed.data[0].payload_encoding).toBe('utf8');
+  });
+});
+
+describe('formatWsMessageLine', () => {
+  it('renders one line per message for streaming', () => {
+    // Not a raw substring check: the payload itself contains quote
+    // characters ('{"op":1}'), which JSON.stringify must escape when
+    // embedding it as a string value — `.toContain('{"op":1}')` against the
+    // raw JSON text can never pass no matter how correct the implementation
+    // is. Parse first, then assert on the decoded value.
+    const parsed = JSON.parse(formatWsMessageLine(wsMessage(), 'agent'));
+    expect(parsed.payload).toBe('{"op":1}');
+  });
+
+  it('carries the full payload uncut, unlike the truncated table preview', () => {
+    // Machine-readable streaming output must never silently clip a payload —
+    // that's a different concern from `truncated`, which reflects storage
+    // clipping. This must hold even past the table preview's 120-char cutoff.
+    const longText = 'x'.repeat(1000);
+    const message = wsMessage({ payload: Buffer.from(longText), size: 1000 });
+    const jsonLine = formatWsMessageLine(message, 'json');
+    const parsed = JSON.parse(jsonLine);
+    expect(parsed.payload).toBe(longText);
+    expect(parsed.payload.length).toBe(1000);
+
+    const tablePreview = formatWsMessageLine(message, 'table');
+    expect(tablePreview).not.toContain(longText);
+  });
+
+  it('reports payload_encoding for both text and binary opcodes', () => {
+    const textOut = JSON.parse(formatWsMessageLine(wsMessage({ opcode: 'text' }), 'json'));
+    expect(textOut.payload_encoding).toBe('utf8');
+
+    const binPayload = Buffer.from([10, 20, 30]);
+    const binOut = JSON.parse(
+      formatWsMessageLine(wsMessage({ opcode: 'binary', payload: binPayload, size: 3 }), 'json'),
+    );
+    expect(binOut.payload_encoding).toBe('base64');
+    expect(binOut.payload).toBe(binPayload.toString('base64'));
+  });
+
+  it('preserves the truncated flag distinctly from payload completeness', () => {
+    const message = wsMessage({ truncated: 1, payload: Buffer.from('clipped-at-storage') });
+    const parsed = JSON.parse(formatWsMessageLine(message, 'json'));
+    expect(parsed.truncated).toBe(1);
+    expect(parsed.payload).toBe('clipped-at-storage');
+  });
+
+  it('includes a human-readable summary in agent format', () => {
+    const parsed = JSON.parse(formatWsMessageLine(wsMessage({ direction: 'received' }), 'agent'));
+    expect(parsed.summary).toContain('server');
   });
 });

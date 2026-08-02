@@ -1,5 +1,5 @@
 import pc from 'picocolors';
-import type { RequestRecord, PaginatedResponse, ReplayResponse, ThrottleSettings, ThrottleProfile } from '../shared/types.js';
+import type { RequestRecord, PaginatedResponse, ReplayResponse, ThrottleSettings, ThrottleProfile, WebSocketMessage } from '../shared/types.js';
 
 // ── Shared column widths ──
 
@@ -444,4 +444,141 @@ export function formatThrottleSettings(
     `  Disable with: ${pc.cyan('laurel-proxy throttle off')}`,
     '',
   ].join('\n');
+}
+
+// ── WebSocket message formatters ──
+
+/**
+ * Only a 'text' opcode is guaranteed by RFC 6455 to carry valid UTF-8.
+ * 'binary' frames and control frames ('ping'/'pong'/'close') carry arbitrary
+ * application bytes (a close frame's payload even starts with a 2-byte
+ * numeric status code) — decoding those as UTF-8 can produce mojibake or
+ * silently mangle bytes that aren't valid UTF-8. The REST API already
+ * base64-encodes every opcode unconditionally for exactly this reason (see
+ * `serializeWsMessage` in server/api.ts); CLI output must stay consistent
+ * with that and state which encoding it used, rather than leaving a consumer
+ * to guess from the key name alone.
+ */
+function wsPayloadEncoding(opcode: WebSocketMessage['opcode']): 'utf8' | 'base64' {
+  return opcode === 'text' ? 'utf8' : 'base64';
+}
+
+/**
+ * Decodes a frame's payload for a full collection record (json/agent),
+ * tagging the encoding used. Kept full (not truncated) — a consumer parsing
+ * JSON may be matching on payload content, so silently clipping it would be
+ * worse than a large value; `truncated` (storage-side clipping) is reported
+ * separately and untouched here.
+ */
+function encodeWsMessageForOutput(m: WebSocketMessage): Record<string, unknown> {
+  const encoding = wsPayloadEncoding(m.opcode);
+  const buf = m.payload ? Buffer.from(m.payload) : null;
+  return {
+    ...m,
+    payload_encoding: encoding,
+    payload: buf ? (encoding === 'utf8' ? buf.toString('utf8') : buf.toString('base64')) : null,
+  };
+}
+
+/**
+ * Same decoding as `encodeWsMessageForOutput`, but for a single streamed
+ * line (`--follow`). Deliberately omits `id`/`request_id`: a `--follow`
+ * session already filters to one connection, so repeating them on every
+ * line would be redundant.
+ */
+function encodeWsMessageLineForOutput(message: WebSocketMessage): Record<string, unknown> {
+  const encoding = wsPayloadEncoding(message.opcode);
+  const full = message.payload ? Buffer.from(message.payload) : null;
+  return {
+    direction: message.direction,
+    opcode: message.opcode,
+    size: message.size,
+    timestamp: message.timestamp,
+    truncated: message.truncated,
+    payload_encoding: encoding,
+    payload: full ? (encoding === 'utf8' ? full.toString('utf8') : full.toString('base64')) : null,
+  };
+}
+
+const WS_CONTROL_ESCAPES: Record<number, string> = {
+  0x00: '\\0', 0x07: '\\a', 0x08: '\\b', 0x09: '\\t',
+  0x0a: '\\n', 0x0b: '\\v', 0x0c: '\\f', 0x0d: '\\r', 0x1b: '\\e',
+};
+
+/**
+ * Neutralizes C0 control characters (including ESC, 0x7f DEL) before a
+ * decoded payload reaches the terminal. A captured frame is untrusted
+ * data — printing it raw would let an embedded ANSI escape sequence
+ * repaint/hide the terminal, and an embedded newline would break the
+ * one-line-per-message table layout this formatter promises.
+ */
+function escapeWsControlChars(text: string): string {
+  let out = '';
+  for (const ch of text) {
+    const code = ch.codePointAt(0) ?? 0;
+    if (code < 0x20 || code === 0x7f) {
+      out += WS_CONTROL_ESCAPES[code] ?? `\\x${code.toString(16).padStart(2, '0')}`;
+    } else {
+      out += ch;
+    }
+  }
+  return out;
+}
+
+/** Single-line, terminal-safe preview of a frame's payload for table format. */
+function wsPayloadPreview(message: WebSocketMessage, maxLength = 120): string {
+  if (!message.payload) return '';
+  // Only 'text' frames are safe to decode and display as UTF-8; binary and
+  // control frames (ping/pong/close) carry arbitrary bytes, so show their
+  // size instead of attempting a decode that could produce garbage.
+  if (message.opcode !== 'text') return `<${message.size} bytes>`;
+  const buf = Buffer.from(message.payload);
+  const text = buf.toString('utf8');
+  const isTruncated = text.length > maxLength;
+  const escaped = escapeWsControlChars(isTruncated ? text.slice(0, maxLength) : text);
+  return isTruncated ? `${escaped}…` : escaped;
+}
+
+export function formatWsMessages(
+  result: PaginatedResponse<WebSocketMessage>,
+  format: string,
+): string {
+  if (format === 'json' || format === 'agent') {
+    const data = result.data.map(encodeWsMessageForOutput);
+    const output: Record<string, unknown> = { ...result, data };
+    if (format === 'agent') {
+      const sent = result.data.filter((m) => m.direction === 'sent').length;
+      const received = result.data.length - sent;
+      output.summary = `${result.total} message${result.total === 1 ? '' : 's'} captured (${sent} sent, ${received} received)`;
+    }
+    return JSON.stringify(output, null, 2);
+  }
+
+  if (result.data.length === 0) {
+    return `\n  ${pc.dim('No messages captured for this connection.')}\n`;
+  }
+
+  const rows = result.data.map((m) => {
+    const arrow = m.direction === 'sent' ? pc.green('→') : pc.blue('←');
+    const time = pc.dim(new Date(m.timestamp).toISOString().slice(11, 23));
+    const opcode = pc.dim(m.opcode.padEnd(6));
+    const size = pc.dim(String(m.size).padStart(7));
+    return `  ${time}  ${arrow}  ${opcode} ${size}  ${wsPayloadPreview(m)}`;
+  });
+
+  const header = `\n  ${pc.dim(`${result.total} message${result.total === 1 ? '' : 's'}`)}  (${pc.green('→')} client→server, ${pc.blue('←')} server→client)\n`;
+  return [header, ...rows, ''].join('\n');
+}
+
+export function formatWsMessageLine(message: WebSocketMessage, format: string): string {
+  if (format === 'json' || format === 'agent') {
+    const record = encodeWsMessageLineForOutput(message);
+    if (format === 'agent') {
+      const arrowLabel = message.direction === 'sent' ? 'client→server' : 'server→client';
+      record.summary = `${arrowLabel} ${message.opcode} frame, ${message.size}B`;
+    }
+    return JSON.stringify(record);
+  }
+  const arrow = message.direction === 'sent' ? pc.green('→') : pc.blue('←');
+  return `${arrow} ${message.opcode} ${message.size}B ${wsPayloadPreview(message)}`;
 }
