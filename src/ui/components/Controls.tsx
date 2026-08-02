@@ -1,5 +1,6 @@
 import { useState, useEffect, useRef, useLayoutEffect, type RefObject } from 'react';
-import { fetchStatus, startProxy, stopProxy, clearRequests, fetchSystemProxyStatus, enableSystemProxy, disableSystemProxy, setThrottle, activePreset, useThrottle } from '../client.ts';
+import { Sliders } from '@phosphor-icons/react';
+import { fetchStatus, startProxy, stopProxy, clearRequests, fetchSystemProxyStatus, enableSystemProxy, disableSystemProxy, setThrottle, activePreset, useThrottle, parseThrottleInputs } from '../client.ts';
 import type { ProxyStatus } from '../client.ts';
 
 interface ControlsProps {
@@ -78,6 +79,75 @@ export function Controls({ onClear, statusEvent, activeView, onViewChange, repea
     }
   };
 
+  // Custom throttle rate popover — the preset <select> above can't express
+  // arbitrary --down/--up/--latency values, only the six named presets.
+  const [customOpen, setCustomOpen] = useState(false);
+  const [downInput, setDownInput] = useState('');
+  const [upInput, setUpInput] = useState('');
+  const [latencyInput, setLatencyInput] = useState('');
+  const [customError, setCustomError] = useState<string | null>(null);
+  const [customSubmitting, setCustomSubmitting] = useState(false);
+  const customPopoverRef = useRef<HTMLDivElement>(null);
+  const firstCustomInputRef = useRef<HTMLInputElement>(null);
+
+  const openCustomPopover = () => {
+    // Prefill with the server-confirmed values (not whatever the last failed
+    // attempt showed), so reopening the popover never shows a rate the
+    // server never actually applied.
+    setDownInput(throttle ? String(throttle.settings.downKbps) : '');
+    setUpInput(throttle ? String(throttle.settings.upKbps) : '');
+    setLatencyInput(throttle ? String(throttle.settings.latencyMs) : '');
+    setCustomError(null);
+    setCustomOpen(true);
+  };
+
+  useEffect(() => {
+    if (!customOpen) return;
+    firstCustomInputRef.current?.focus();
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') setCustomOpen(false);
+    };
+    const onClickOutside = (e: MouseEvent) => {
+      if (customPopoverRef.current && !customPopoverRef.current.contains(e.target as Node)) {
+        setCustomOpen(false);
+      }
+    };
+    document.addEventListener('keydown', onKeyDown);
+    document.addEventListener('mousedown', onClickOutside);
+    return () => {
+      document.removeEventListener('keydown', onKeyDown);
+      document.removeEventListener('mousedown', onClickOutside);
+    };
+  }, [customOpen]);
+
+  const submitCustomThrottle = async (e: React.FormEvent) => {
+    e.preventDefault();
+    const parsed = parseThrottleInputs(downInput, upInput, latencyInput);
+    if ('error' in parsed) {
+      // Reject locally without ever calling the server — and without closing
+      // the popover, so the rejected value stays visible next to the error
+      // rather than silently reverting.
+      setCustomError(parsed.error);
+      return;
+    }
+    setCustomSubmitting(true);
+    setCustomError(null);
+    try {
+      await setThrottle({ enabled: true, ...parsed.values });
+      setCustomOpen(false);
+    } catch (err) {
+      // The server rejected it (400 validation, or 500 persistence failure).
+      // Keep the popover open with the values still in the inputs and the
+      // server's own error message — never treat this as applied.
+      setCustomError(err instanceof Error ? err.message : 'Failed to apply custom rate');
+    } finally {
+      setCustomSubmitting(false);
+      // Same reasoning as onPresetChange: trust the server's own state, not
+      // an optimistic guess, whether the PUT succeeded or failed.
+      refreshThrottle();
+    }
+  };
+
   return (
     <div className="flex items-center gap-3 px-4 py-2.5 border-b border-border-subtle bg-bg-primary h-12">
       {/* Logo */}
@@ -115,29 +185,114 @@ export function Controls({ onClear, statusEvent, activeView, onViewChange, repea
       </button>
 
       {/* Throttle control */}
-      <select
-        value={preset}
-        onChange={(e) => onPresetChange(e.target.value)}
-        title={
-          preset === 'unknown'
-            ? 'Throttle state unavailable'
-            : throttleEnabled
-              ? `Throttling enabled (${preset}) — recorded durations include simulated delay`
-              : 'Throttling disabled — select a network profile to simulate a slower connection'
-        }
-        className={`px-2.5 py-1 rounded-full text-[11px] font-medium border outline-none cursor-pointer transition-colors ${
-          throttleEnabled
-            ? 'bg-accent/10 text-accent border-accent/20 hover:bg-accent/20'
-            : 'bg-bg-secondary text-text-muted border-border hover:border-text-muted hover:text-text-secondary'
-        }`}
-      >
-        {preset === 'unknown' && <option value="unknown" disabled>…</option>}
-        <option value="off">No Throttle</option>
-        {Object.keys(throttle?.presets ?? {}).map((key) => (
-          <option key={key} value={key}>{key}</option>
-        ))}
-        {preset === 'custom' && <option value="custom" disabled>custom</option>}
-      </select>
+      <div className="relative flex items-center gap-1">
+        <select
+          value={preset}
+          onChange={(e) => onPresetChange(e.target.value)}
+          title={
+            preset === 'unknown'
+              ? 'Throttle state unavailable'
+              : throttleEnabled
+                ? `Throttling enabled (${preset}) — recorded durations include simulated delay`
+                : 'Throttling disabled — select a network profile to simulate a slower connection'
+          }
+          className={`px-2.5 py-1 rounded-full text-[11px] font-medium border outline-none cursor-pointer transition-colors ${
+            throttleEnabled
+              ? 'bg-accent/10 text-accent border-accent/20 hover:bg-accent/20'
+              : 'bg-bg-secondary text-text-muted border-border hover:border-text-muted hover:text-text-secondary'
+          }`}
+        >
+          {preset === 'unknown' && <option value="unknown" disabled>…</option>}
+          <option value="off">No Throttle</option>
+          {Object.keys(throttle?.presets ?? {}).map((key) => (
+            <option key={key} value={key}>{key}</option>
+          ))}
+          {preset === 'custom' && <option value="custom" disabled>custom</option>}
+        </select>
+
+        <button
+          type="button"
+          onClick={() => (customOpen ? setCustomOpen(false) : openCustomPopover())}
+          aria-haspopup="dialog"
+          aria-expanded={customOpen}
+          title="Set custom throttle rates"
+          className={`p-1 rounded-md border transition-colors ${
+            customOpen
+              ? 'bg-accent/10 text-accent border-accent/20'
+              : 'bg-bg-secondary text-text-muted border-border hover:border-text-muted hover:text-text-secondary'
+          }`}
+        >
+          <Sliders size={12} weight="bold" />
+        </button>
+
+        {customOpen && (
+          <div
+            ref={customPopoverRef}
+            role="dialog"
+            aria-label="Custom throttle rates"
+            className="absolute z-20 top-full left-0 mt-1.5 w-52 p-3 rounded-md border border-border bg-bg-secondary shadow-lg"
+          >
+            <form onSubmit={submitCustomThrottle} className="flex flex-col gap-2">
+              <label className="flex flex-col gap-0.5 text-[10px] text-text-muted">
+                Down (kbps)
+                <input
+                  ref={firstCustomInputRef}
+                  type="number"
+                  min="0"
+                  step="any"
+                  inputMode="decimal"
+                  value={downInput}
+                  onChange={(e) => setDownInput(e.target.value)}
+                  className="px-2 py-1 rounded border border-border-subtle bg-bg-primary text-xs text-text-primary outline-none focus:border-accent/40"
+                />
+              </label>
+              <label className="flex flex-col gap-0.5 text-[10px] text-text-muted">
+                Up (kbps)
+                <input
+                  type="number"
+                  min="0"
+                  step="any"
+                  inputMode="decimal"
+                  value={upInput}
+                  onChange={(e) => setUpInput(e.target.value)}
+                  className="px-2 py-1 rounded border border-border-subtle bg-bg-primary text-xs text-text-primary outline-none focus:border-accent/40"
+                />
+              </label>
+              <label className="flex flex-col gap-0.5 text-[10px] text-text-muted">
+                Latency (ms)
+                <input
+                  type="number"
+                  min="0"
+                  step="any"
+                  inputMode="decimal"
+                  value={latencyInput}
+                  onChange={(e) => setLatencyInput(e.target.value)}
+                  className="px-2 py-1 rounded border border-border-subtle bg-bg-primary text-xs text-text-primary outline-none focus:border-accent/40"
+                />
+              </label>
+
+              {customError && <p className="text-[11px] text-red-400">{customError}</p>}
+
+              <div className="flex items-center justify-end gap-1.5 mt-1">
+                <button
+                  type="button"
+                  onClick={() => setCustomOpen(false)}
+                  className="px-2 py-1 text-[11px] rounded-md border border-border text-text-secondary hover:bg-bg-tertiary transition-colors"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  disabled={customSubmitting}
+                  className="px-2 py-1 text-[11px] rounded-md border border-accent/20 bg-accent/10 text-accent hover:bg-accent/20 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                >
+                  {customSubmitting ? 'Applying…' : 'Apply'}
+                </button>
+              </div>
+            </form>
+          </div>
+        )}
+      </div>
 
       {/* Filter input */}
       <div className="flex-1 max-w-lg flex items-center gap-2 px-3 py-1.5 bg-bg-secondary border border-border-subtle rounded-md text-xs text-text-muted cursor-text min-w-0 mx-auto transition-[border-color,box-shadow] duration-150 focus-within:border-accent/30 focus-within:shadow-[0_0_8px_rgba(34,197,94,0.08)]"

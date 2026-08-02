@@ -145,6 +145,46 @@ export async function setThrottle(
  * - 'custom' when enabled but no preset matches exactly. This is reachable
  *   because the CLI/API accept arbitrary --down/--up/--latency values.
  */
+export interface ThrottleFormValues {
+  downKbps: number;
+  upKbps: number;
+  latencyMs: number;
+}
+
+/**
+ * Parses the three text inputs of the custom-throttle popover into a
+ * validated payload, mirroring the server's `validateThrottleSettings`
+ * (`src/server/throttle.ts`): each field must be finite and non-negative.
+ * This is a client-side convenience only — it lets the popover reject an
+ * obviously-bad value (blank, negative, "fast") without a round trip, but it
+ * is not the source of truth. The server's own 400/500 must still be
+ * surfaced to the user even when this parse passes, since persistence can
+ * fail for reasons this function can't see.
+ */
+export function parseThrottleInputs(
+  downKbps: string,
+  upKbps: string,
+  latencyMs: string,
+): { values: ThrottleFormValues } | { error: string } {
+  const entries: Array<[keyof ThrottleFormValues, string]> = [
+    ['downKbps', downKbps],
+    ['upKbps', upKbps],
+    ['latencyMs', latencyMs],
+  ];
+  const values = {} as ThrottleFormValues;
+  for (const [key, raw] of entries) {
+    const trimmed = raw.trim();
+    if (trimmed === '') return { error: `${key} is required` };
+    const n = Number(trimmed);
+    // Number.isFinite rejects NaN/±Infinity and, since `trimmed` is already a
+    // string, also anything Number() can't parse ('fast' -> NaN). Matches the
+    // server's own check exactly.
+    if (!Number.isFinite(n) || n < 0) return { error: `${key} must be a non-negative number` };
+    values[key] = n;
+  }
+  return { values };
+}
+
 export function activePreset(state: ThrottleState | null): string {
   if (!state) return 'unknown';
   if (!state.settings.enabled) return 'off';

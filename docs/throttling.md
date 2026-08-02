@@ -101,6 +101,21 @@ up/down rate limiter) but receives **no added latency at all**, because delaying
 frame of a long-lived connection would distort the very timing that WebSocket debugging
 usually cares about.
 
+## Web UI
+
+The toolbar's throttle dropdown offers `off` plus the six presets above, and shows
+`custom` (disabled, unselectable) whenever the live settings don't match any preset
+exactly — the same rule `activePreset` uses for the CLI-vs-UI-vs-config-file
+consistency checks. A small sliders button next to the dropdown opens a popover with
+`Down (kbps)` / `Up (kbps)` / `Latency (ms)` fields for entering exactly those
+arbitrary values, equivalent to the CLI's `--down`/`--up`/`--latency` flags; submitting
+sends `{enabled: true, downKbps, upKbps, latencyMs}` to `PUT /api/throttle`.
+
+A rejected value (negative, non-finite, or a `500` from a failed config write) is shown
+inline in the popover as the server's own error text, and the popover stays open with
+the rejected values still in the fields — it is never applied optimistically, and the
+dropdown never shows a rate the server didn't actually accept.
+
 ## Duration is inflated by throttling — read this before trusting timing data
 
 Throttling works by making the proxy wait before forwarding bytes, and that wait is

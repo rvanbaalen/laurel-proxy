@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { activePreset, escapeWsControlChars, formatWsPayload, describeReplayOutcome, mergeWsMessages } from './client.ts';
+import { activePreset, escapeWsControlChars, formatWsPayload, describeReplayOutcome, mergeWsMessages, parseThrottleInputs } from './client.ts';
 import type { ThrottleState, WsOpcode, WsReplayResponse, UiWsMessage } from './client.ts';
 
 function b64(s: string): string {
@@ -276,5 +276,52 @@ describe('mergeWsMessages', () => {
 
   it('returns an empty array when both inputs are empty', () => {
     expect(mergeWsMessages([], [])).toEqual([]);
+  });
+});
+
+describe('parseThrottleInputs', () => {
+  it('parses three valid numeric strings', () => {
+    const result = parseThrottleInputs('500', '100', '200');
+    expect(result).toEqual({ values: { downKbps: 500, upKbps: 100, latencyMs: 200 } });
+  });
+
+  it('accepts decimal and zero values', () => {
+    const result = parseThrottleInputs('12.5', '0', '0');
+    expect(result).toEqual({ values: { downKbps: 12.5, upKbps: 0, latencyMs: 0 } });
+  });
+
+  it('trims surrounding whitespace', () => {
+    const result = parseThrottleInputs(' 500 ', '100', '200');
+    expect(result).toEqual({ values: { downKbps: 500, upKbps: 100, latencyMs: 200 } });
+  });
+
+  it('rejects a blank field rather than silently treating it as 0', () => {
+    const result = parseThrottleInputs('', '100', '200');
+    expect(result).toEqual({ error: 'downKbps is required' });
+  });
+
+  it('rejects a whitespace-only field the same as blank', () => {
+    const result = parseThrottleInputs('500', '   ', '200');
+    expect(result).toEqual({ error: 'upKbps is required' });
+  });
+
+  it('rejects a negative rate, matching the server\'s own rejection', () => {
+    const result = parseThrottleInputs('500', '-5', '200');
+    expect(result).toEqual({ error: 'upKbps must be a non-negative number' });
+  });
+
+  it('rejects a non-numeric value', () => {
+    const result = parseThrottleInputs('500', '100', 'fast');
+    expect(result).toEqual({ error: 'latencyMs must be a non-negative number' });
+  });
+
+  it('rejects Infinity, matching Number.isFinite on the server', () => {
+    const result = parseThrottleInputs('Infinity', '100', '200');
+    expect(result).toEqual({ error: 'downKbps must be a non-negative number' });
+  });
+
+  it('checks fields in down/up/latency order, reporting the first failure', () => {
+    const result = parseThrottleInputs('-1', '-2', '-3');
+    expect(result).toEqual({ error: 'downKbps must be a non-negative number' });
   });
 });
