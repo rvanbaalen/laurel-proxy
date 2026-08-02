@@ -6,7 +6,7 @@
     "name": "rvanbaalen",
     "url": "https://github.com/rvanbaalen"
   },
-  "repository": "https://github.com/rvanbaalen/laurel-proxy",
+  "repository": "https://github.com/rvanbaalen/laurelproxy",
   "license": "MIT",
   "keywords": ["proxy", "http", "https", "traffic", "debugging", "network"]
 }
