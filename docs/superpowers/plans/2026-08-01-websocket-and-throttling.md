@@ -3502,17 +3502,62 @@ export async function replayWebSocketConnection(requestId: string): Promise<unkn
 
 - [ ] **Step 2: Add the tab**
 
-In `src/ui/components/RequestDetail.tsx`, add a `Messages` tab to the existing tab
-strip, rendered only when `record.kind === 'websocket'`. Fetch on tab activation,
-then append live frames from the existing SSE connection filtered by `request_id`.
+Concrete facts about the existing component, so you don't have to infer them:
 
-Render each frame as a row: direction arrow, opcode, size, timestamp, and payload.
-Decode base64 to UTF-8 for `text` frames and pretty-print when the payload parses as
-JSON; show `<N bytes>` for `binary`. Add a "Replay connection" button that calls
-`replayWebSocketConnection` and shows the returned frame count and replies.
+- `activeTab` is `useState<'request' | 'response'>('response')` — widen the union to
+  include `'messages'`.
+- The tab strip is `<div className="flex border-b border-border-subtle">` holding one
+  `<button>` per tab. Active class: `text-text-primary border-b-2 border-accent`.
+  Inactive: `text-text-muted hover:text-text-secondary border-b-2 border-transparent`.
+  Shared: `px-4 py-2 text-xs transition-all duration-200 ease-bounce`.
+- **UI files import with `.ts` extensions** (`from '../client.ts'`), unlike server code.
+- `RequestRecord` in `src/ui/client.ts` does **not** yet have `kind` — add it as
+  `kind?: 'http' | 'websocket'` to match the optional server-side type.
 
-Follow the existing Tailwind class conventions and the tab-state pattern already in
-this file. Use `→` for `sent` and `←` for `received`, matching the CLI output.
+Render the Messages tab only when `record.kind === 'websocket'`. Fetch on tab
+activation, then append live frames from the existing SSE stream filtered by
+`request_id`.
+
+**Reset `activeTab` when the selected request changes.** If the user is on `messages`
+and then selects an ordinary HTTP request, the tab disappears while still being the
+active value, leaving a blank panel. Fall back to `'response'` whenever the current tab
+isn't available for the current record.
+
+Each frame renders as a row: direction arrow (`→` for `sent`, `←` for `received`, matching
+the CLI), opcode, size, timestamp, payload. Decode base64 to UTF-8 for `text` frames and
+pretty-print when the payload parses as JSON; show `<N bytes>` for `binary`. Do **not**
+render raw control characters — the CLI escapes them via `escapeWsControlChars` for the
+same reason.
+
+**Distinguish "no frames" from "failed to load".** A fetch failure must not render as an
+empty connection, for the same reason Task 6's throttle control must not render unknown
+state as "off": it silently misreports. Keep three states — loading, loaded-empty, error.
+
+- [ ] **Step 2b: Replay must use `requestId`, and must not misreport why it stopped**
+
+Two constraints established by Task 12 and verified in its review:
+
+1. **Replay via `{ requestId }`, never by posting `{ url, frames }`.** `src/server/index.ts`
+   uses `express.json()` with no `limit` override, so the 100 kb default applies. A single
+   base64 frame payload can exceed that on its own, independent of the ~3,300-frame
+   ceiling — so posting recorded frames from the browser fails on exactly the captures
+   most worth replaying.
+
+2. **`WsReplayResponse.stoppedBecause` is a required field** with values
+   `'idle' | 'close' | 'timeout' | 'error'`. **Do not treat absence of `error` as
+   success.** `'idle'` means replay stopped waiting after the 500 ms quiet period, which
+   happens whenever the server's first reply is slower than that — routine behind a
+   database read. Rendering that as a successful replay that returned nothing would be
+   actively misleading.
+
+   Surface each reason distinctly: `'close'` is a clean finish, `'idle'` should say the
+   server went quiet and replies may be incomplete, `'timeout'` and `'error'` are
+   failures. Also surface `closeCode` when present — on an abrupt disconnect it is 1006
+   with no error event, and is the only signal distinguishing "closed" from "cut".
+
+   Note the endpoint returns 400 when the recorded connection contains truncated
+   client-sent frames (replay would send corrupted payloads). Show that message rather
+   than a generic failure.
 
 - [ ] **Step 3: Verify in the browser**
 
