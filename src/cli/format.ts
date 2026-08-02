@@ -1,5 +1,5 @@
 import pc from 'picocolors';
-import type { RequestRecord, PaginatedResponse, ReplayResponse, ThrottleSettings, ThrottleProfile, WebSocketMessage } from '../shared/types.js';
+import type { RequestRecord, RequestKind, PaginatedResponse, ReplayResponse, ThrottleSettings, ThrottleProfile, WebSocketMessage } from '../shared/types.js';
 
 // ── Shared column widths ──
 
@@ -74,9 +74,40 @@ function agentSummary(r: RequestRecord): string {
   return `${r.method} ${r.url} → ${status}${duration}`;
 }
 
+/**
+ * The `kind` an agent (or a table row) should be told about.
+ *
+ * Defaulted rather than passed through: `kind` is optional on `RequestRecord` and
+ * absent on every row written before the column existed, and `undefined` in
+ * agent output would read as "unknown" for what is really an ordinary HTTP
+ * request.
+ */
+function recordKind(r: RequestRecord): RequestKind {
+  return r.kind ?? 'http';
+}
+
+/**
+ * A compact marker for the traffic that is not an ordinary HTTP request.
+ *
+ * Only non-HTTP rows are tagged: a `kind` column carrying "http" on almost every
+ * row would cost width on the format that is read by eye and say nothing. A
+ * WebSocket handshake's method is always GET, so prefixing the method cell adds no
+ * column and hides nothing.
+ */
+function kindMarker(r: RequestRecord): string {
+  return recordKind(r) === 'websocket' ? `${pc.cyan('WS')} ` : '';
+}
+
 function toAgentRecord(r: RequestRecord) {
   return {
     summary: agentSummary(r),
+    /**
+     * Without this an agent cannot tell a WebSocket connection from an HTTP
+     * request, and so cannot discover which id to hand to
+     * `laurel-proxy messages <id>` — the capture feature would have no
+     * agent-side entry point.
+     */
+    kind: recordKind(r),
     request: {
       method: r.method,
       url: r.url,
@@ -153,7 +184,7 @@ export function formatRequests(result: PaginatedResponse<RequestRecord>, format:
 
   const rows = result.data.map((r) => {
     return '  ' +
-      padAnsi(methodColor(r.method || ''), COL.method) +
+      padAnsi(kindMarker(r) + methodColor(r.method || ''), COL.method) +
       padAnsi(statusColor(r.status), COL.status) +
       (r.host || '').slice(0, COL.host - 2).padEnd(COL.host) +
       padAnsi(pc.dim((r.path || '').slice(0, COL.path - 2)), COL.path) +
@@ -182,6 +213,7 @@ export function formatRequest(record: RequestRecord, format: string): string {
     `  ${pc.dim('Status')}    ${statusColor(record.status)}`,
     `  ${pc.dim('Duration')}  ${record.duration}ms`,
     `  ${pc.dim('Protocol')}  ${record.protocol}`,
+    `  ${pc.dim('Kind')}      ${recordKind(record)}`,
     `  ${pc.dim('Time')}      ${new Date(record.timestamp).toISOString()}`,
     '',
     `  ${pc.bold('Request Headers')}`,
@@ -242,6 +274,9 @@ export function formatTailLine(r: RequestRecord, format: string): string {
   if (format === 'agent') {
     return JSON.stringify({
       summary: agentSummary(r),
+      // Same reason as `toAgentRecord`: an agent tailing traffic has to be able
+      // to spot a WebSocket connection as it opens, not only in a later query.
+      kind: recordKind(r),
       context: {
         is_error: r.status != null && r.status >= 400,
         content_type: r.content_type,
@@ -251,7 +286,7 @@ export function formatTailLine(r: RequestRecord, format: string): string {
 
   return '  ' +
     padAnsi(pc.dim(new Date(r.timestamp).toLocaleTimeString()), COL.time) +
-    padAnsi(methodColor(r.method || ''), COL.method) +
+    padAnsi(kindMarker(r) + methodColor(r.method || ''), COL.method) +
     padAnsi(statusColor(r.status), COL.status) +
     (r.host || '').slice(0, COL.host - 2).padEnd(COL.host) +
     padAnsi(pc.dim((r.path || '').slice(0, COL.path - 2)), COL.path) +

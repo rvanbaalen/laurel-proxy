@@ -200,6 +200,7 @@ laurel-proxy requests [options]
 | `--failed` | | Show only 4xx and 5xx responses |
 | `--method <method>` | | Filter by HTTP method |
 | `--search <pattern>` | | Search URLs (substring match) |
+| `--kind <kind>` | | Filter by traffic kind: `http` or `websocket` |
 | `--since <time>` | | After this time (Unix ms or ISO date) |
 | `--until <time>` | | Before this time (Unix ms or ISO date) |
 | `--last-hour` | | Requests from the last hour |

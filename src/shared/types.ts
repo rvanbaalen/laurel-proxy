@@ -91,6 +91,13 @@ export interface ProxyStatus {
 
 export interface RequestFilter {
   host?: string;
+  /**
+   * 'http' matches a NULL `kind` too: the column arrived by migration, and a row
+   * that predates it — or one written around `bindRecord` — reads back NULL
+   * rather than 'http'. Excluding those from both filters would make a row
+   * visible unfiltered and invisible filtered, which is worse than either answer.
+   */
+  kind?: RequestKind;
   status?: number;
   statusMin?: number;
   statusMax?: number;

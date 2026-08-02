@@ -58,6 +58,44 @@ describe('formatRequests agent format', () => {
     expect(parsed.data[1].context.is_error).toBe(true);
   });
 
+  it('tells an agent which records are WebSocket connections', () => {
+    // Without this an agent reading `--format agent` cannot tell a WebSocket
+    // connection from an HTTP request, and therefore cannot find the id to pass
+    // to `laurel-proxy messages` — the new feature would have no agent-side
+    // discovery step at all.
+    const result: PaginatedResponse<RequestRecord> = {
+      data: [makeRequest(), makeRequest({ kind: 'websocket', status: 101 })],
+      total: 2,
+      limit: 50,
+      offset: 0,
+    };
+    const parsed = JSON.parse(formatRequests(result, 'agent'));
+    expect(parsed.data[0].kind).toBe('http');
+    expect(parsed.data[1].kind).toBe('websocket');
+  });
+
+  it('marks WebSocket connections in the table format too', () => {
+    const wsOut = formatRequests(
+      { data: [makeRequest({ kind: 'websocket', status: 101 })], total: 1, limit: 50, offset: 0 },
+      'table',
+    );
+    const httpOut = formatRequests(
+      { data: [makeRequest()], total: 1, limit: 50, offset: 0 },
+      'table',
+    );
+    // A marker only on the rows that need one: tagging every HTTP row would be
+    // noise on the format that is read by eye.
+    expect(wsOut).toContain('WS');
+    expect(httpOut).not.toContain('WS');
+
+    // And the marker must live inside the existing method column rather than
+    // shifting the row: a table whose columns move per row is worse than no
+    // marker. Compared on visible text, since both rows carry colour codes.
+    const visible = (out: string): string =>
+      (out.split('\n').find((line) => line.includes('example.com')) ?? '').replace(/\x1b\[[0-9;]*m/g, '');
+    expect(visible(wsOut).indexOf('example.com')).toBe(visible(httpOut).indexOf('example.com'));
+  });
+
   it('decodes Buffer bodies to strings', () => {
     const result: PaginatedResponse<RequestRecord> = {
       data: [makeRequest({ response_body: Buffer.from('{"hello":"world"}') })],
@@ -114,6 +152,17 @@ describe('formatTailLine agent format', () => {
     const parsed = JSON.parse(output);
     expect(parsed).toHaveProperty('summary');
     expect(parsed.context).toHaveProperty('is_error');
+  });
+
+  it('carries kind, so a tailing agent can spot a WebSocket connection as it opens', () => {
+    expect(JSON.parse(formatTailLine(makeRequest({ kind: 'websocket' }), 'agent')).kind)
+      .toBe('websocket');
+    expect(JSON.parse(formatTailLine(makeRequest(), 'agent')).kind).toBe('http');
+  });
+
+  it('marks a WebSocket connection in the streamed table line', () => {
+    expect(formatTailLine(makeRequest({ kind: 'websocket' }), 'table')).toContain('WS');
+    expect(formatTailLine(makeRequest(), 'table')).not.toContain('WS');
   });
 });
 

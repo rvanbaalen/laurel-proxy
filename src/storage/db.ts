@@ -182,6 +182,18 @@ export class Database {
       conditions.push('host LIKE @host');
       params.host = `%${filter.host}%`;
     }
+    if (filter.kind) {
+      // `kind` is a migrated column, so 'http' has to include NULL: see the note
+      // on `RequestFilter.kind`.
+      if (filter.kind === 'http') {
+        // No bound parameter here on purpose: better-sqlite3 rejects a named
+        // parameter the statement does not use.
+        conditions.push("(kind IS NULL OR kind = 'http')");
+      } else {
+        conditions.push('kind = @kind');
+        params.kind = filter.kind;
+      }
+    }
     if (filter.status !== undefined) {
       conditions.push('status = @status');
       params.status = filter.status;

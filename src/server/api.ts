@@ -132,6 +132,18 @@ export function createApiRouter(
   router.get('/requests', (req: Request, res: Response) => {
     const filter: RequestFilter = {};
     if (req.query.host) filter.host = req.query.host as string;
+    if (req.query.kind !== undefined) {
+      // Rejected rather than ignored: a caller that asked for one kind and
+      // silently received every kind has been given a wrong answer with nothing
+      // to indicate it. Every other filter here is a free-text or numeric match
+      // where a typo narrows the result; `kind` is a closed set, so a typo is
+      // knowable.
+      if (req.query.kind !== 'http' && req.query.kind !== 'websocket') {
+        res.status(400).json({ error: 'kind must be "http" or "websocket"' });
+        return;
+      }
+      filter.kind = req.query.kind;
+    }
     if (req.query.status) filter.status = parseInt(req.query.status as string, 10);
     if (req.query.method) filter.method = req.query.method as string;
     if (req.query.content_type) filter.content_type = req.query.content_type as string;

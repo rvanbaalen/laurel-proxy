@@ -9,7 +9,22 @@ afterward is decoded and stored.
 - The `101 Switching Protocols` handshake becomes an ordinary row in `requests`
   with `kind: 'websocket'`, so it shows up in the existing traffic list, filters,
   and search exactly like an HTTP request — same table, same `laurel-proxy requests`
-  output, one extra `kind` value to notice.
+  output, one extra `kind` value to notice. Where each surface shows it:
+  - `--format table` tags the row's method cell with a cyan `WS` (HTTP rows are
+    left untagged, and the marker does not shift the columns).
+  - `--format agent` and `--format json` carry a top-level `kind` field, on both
+    `laurel-proxy requests` and `laurel-proxy requests --tail`.
+  - `laurel-proxy request <id>` shows a `Kind` line.
+  - Filter either way with `laurel-proxy requests --kind websocket` (or
+    `--kind http`), which works on `--tail` too, and with
+    `GET /api/requests?kind=websocket`. An unrecognised kind is an error rather
+    than an ignored filter.
+
+  Finding the id to pass to `laurel-proxy messages` is therefore a one-liner:
+
+  ```bash
+  laurel-proxy requests --kind websocket --format agent
+  ```
 - Every subsequent frame is decoded (RFC 6455) and written to a separate
   `websocket_messages` table, keyed by the handshake's request id.
 - `direction` on each frame is `'sent'` (client → server) or `'received'`

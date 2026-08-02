@@ -53,6 +53,18 @@ describe('buildFilter', () => {
     expect(filter.status).toBe(500);
     expect(filter.statusMin).toBeUndefined();
   });
+
+  it('maps --kind to a kind filter', () => {
+    expect(buildFilter({ kind: 'websocket' }).kind).toBe('websocket');
+    expect(buildFilter({ kind: 'http' }).kind).toBe('http');
+  });
+
+  it('ignores an unrecognised --kind rather than filtering on a value nothing can match', () => {
+    // The command validates and exits before reaching here; a silently-applied
+    // bogus value would return an empty list that looks like "no such traffic".
+    expect(buildFilter({ kind: 'webscoket' }).kind).toBeUndefined();
+    expect(buildFilter({}).kind).toBeUndefined();
+  });
 });
 
 describe('matchesFilter', () => {
@@ -69,5 +81,15 @@ describe('matchesFilter', () => {
   it('checks durationMin', () => {
     expect(matchesFilter(makeRecord({ duration: 1000 }), { durationMin: 500 })).toBe(true);
     expect(matchesFilter(makeRecord({ duration: 100 }), { durationMin: 500 })).toBe(false);
+  });
+
+  it('checks kind, treating an absent kind as http', () => {
+    // `--tail` filters live SSE records through here rather than through SQL, so
+    // `--kind` has to mean the same thing on both paths or the same flag would
+    // select different traffic depending on whether you were tailing.
+    expect(matchesFilter(makeRecord({ kind: 'websocket' }), { kind: 'websocket' })).toBe(true);
+    expect(matchesFilter(makeRecord({ kind: 'http' }), { kind: 'websocket' })).toBe(false);
+    expect(matchesFilter(makeRecord(), { kind: 'http' })).toBe(true);
+    expect(matchesFilter(makeRecord(), { kind: 'websocket' })).toBe(false);
   });
 });

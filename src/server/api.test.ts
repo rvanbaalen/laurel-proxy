@@ -190,6 +190,28 @@ describe('REST API', () => {
     expect(body.data[0].host).toBe('api.example.com');
   });
 
+  it('GET /api/requests filters by kind', async () => {
+    db.insert(makeRequest({ host: 'plain.example.com' }));
+    db.insert(makeRequest({ host: 'socket.example.com', kind: 'websocket', status: 101 }));
+
+    const ws = JSON.parse((await httpReq(port, '/api/requests?kind=websocket')).body);
+    expect(ws.total).toBe(1);
+    expect(ws.data[0].host).toBe('socket.example.com');
+
+    const http = JSON.parse((await httpReq(port, '/api/requests?kind=http')).body);
+    expect(http.total).toBe(1);
+    expect(http.data[0].host).toBe('plain.example.com');
+  });
+
+  it('GET /api/requests rejects an unknown kind rather than ignoring the filter', async () => {
+    db.insert(makeRequest());
+    // Silently dropping an unrecognised filter is the worse failure: the caller
+    // asked for a subset and would get everything back, with nothing saying so.
+    const res = await httpReq(port, '/api/requests?kind=webscoket');
+    expect(res.status).toBe(400);
+    expect(JSON.parse(res.body).error).toMatch(/kind/i);
+  });
+
   it('GET /api/requests/:id returns single request', async () => {
     const req = makeRequest();
     db.insert(req);

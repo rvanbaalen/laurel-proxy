@@ -110,6 +110,36 @@ describe('Database', () => {
     expect(page1.offset).toBe(0);
   });
 
+  it('queries with a kind filter', () => {
+    db.insert(makeRequest({ host: 'plain.example.com' }));
+    db.insert(makeRequest({ host: 'socket.example.com', kind: 'websocket' }));
+
+    const ws = db.query({ kind: 'websocket' });
+    expect(ws.total).toBe(1);
+    expect(ws.data[0].host).toBe('socket.example.com');
+
+    const http = db.query({ kind: 'http' });
+    expect(http.total).toBe(1);
+    expect(http.data[0].host).toBe('plain.example.com');
+  });
+
+  it('counts a row with a NULL kind as http rather than dropping it from both filters', () => {
+    // `kind` is a column added by migration with a DEFAULT, so existing rows read
+    // back as 'http' — but the column is nullable, and a row written by anything
+    // that bypasses `bindRecord` can hold NULL. `kind = 'http'` would silently
+    // exclude it from both filters, which is worse than either answer: the row
+    // would exist in an unfiltered list and vanish from every filtered one.
+    const raw = new BetterSqlite3(dbPath);
+    raw.prepare(
+      `INSERT INTO requests (id, timestamp, method, url, host, path, protocol, kind)
+       VALUES ('null-kind', 1, 'GET', 'http://n/x', 'n', '/x', 'http', NULL)`,
+    ).run();
+    raw.close();
+
+    expect(db.query({ kind: 'http' }).data.map((r) => r.id)).toContain('null-kind');
+    expect(db.query({ kind: 'websocket' }).data.map((r) => r.id)).not.toContain('null-kind');
+  });
+
   it('deletes all requests', () => {
     db.insert(makeRequest());
     db.insert(makeRequest());

@@ -53,11 +53,17 @@ async function autoStartProxy(requestedUiPort: number): Promise<{ server: Laurel
   return { server, uiPort: ports.uiPort, systemProxyEnabled };
 }
 
+export const REQUEST_KINDS = ['http', 'websocket'] as const;
+
 /** Build a RequestFilter from CLI options. Shared by tail and query paths. */
 export function buildFilter(opts: Record<string, string | boolean | undefined>): RequestFilter {
   const filter: RequestFilter = {};
 
   if (opts.host) filter.host = opts.host as string;
+  // Only a recognised value is applied. An unrecognised one is rejected by the
+  // command before it gets here; applying it anyway would return an empty list
+  // that reads as "there is no such traffic" rather than "that is not a kind".
+  if (opts.kind === 'http' || opts.kind === 'websocket') filter.kind = opts.kind;
   if (opts.method) filter.method = opts.method as string;
   if (opts.search) filter.search = opts.search as string;
   if (opts.since) filter.since = parseTime(opts.since as string);
@@ -93,6 +99,7 @@ export function registerRequests(program: Command): void {
     .option('--failed', 'Show only 4xx and 5xx responses')
     .option('--method <method>', 'Filter by HTTP method')
     .option('--search <pattern>', 'Search URL')
+    .option('--kind <kind>', `Filter by traffic kind (${REQUEST_KINDS.join('|')})`)
     .option('--since <time>', 'Requests after this time')
     .option('--until <time>', 'Requests before this time')
     .option('--last-hour', 'Requests from the last hour')
@@ -108,6 +115,11 @@ export function registerRequests(program: Command): void {
       const validFormats = ['json', 'table', 'agent'];
       if (opts.format && !validFormats.includes(opts.format)) {
         console.error(`Invalid format "${opts.format}". Valid formats: ${validFormats.join(', ')}`);
+        process.exit(1);
+      }
+
+      if (opts.kind && !REQUEST_KINDS.includes(opts.kind)) {
+        console.error(`Invalid kind "${opts.kind}". Valid kinds: ${REQUEST_KINDS.join(', ')}`);
         process.exit(1);
       }
 
@@ -158,6 +170,9 @@ export function registerRequests(program: Command): void {
 
 export function matchesFilter(record: RequestRecord, filter: RequestFilter): boolean {
   if (filter.host && !record.host?.toLowerCase().includes(filter.host.toLowerCase())) return false;
+  // Same default as the SQL path's NULL handling, so `--kind` selects the same
+  // traffic whether it is applied to a query or to the live `--tail` stream.
+  if (filter.kind && (record.kind ?? 'http') !== filter.kind) return false;
   if (filter.status && record.status !== filter.status) return false;
   if (filter.statusMin !== undefined && (record.status == null || record.status < filter.statusMin)) return false;
   if (filter.statusMax !== undefined && (record.status == null || record.status > filter.statusMax)) return false;
