@@ -1818,6 +1818,7 @@ export class WsFrameDecoder {
     return { message: null };
   }
 }
+```
 
 Note the `OPCODE_BYTES` map above is used only by `encodeFrame`; move it to the test
 helper too and delete it from `ws-frames.ts`, leaving only the decode-side `OPCODES` map.
