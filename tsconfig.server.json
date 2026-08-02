@@ -1,7 +1,10 @@
 {
   "extends": "./tsconfig.json",
   "compilerOptions": {
-    "outDir": "./dist"
+    "outDir": "./dist",
+    // Set here rather than in the base config: the base config also type-checks
+    // `tests/`, which lives outside `src/`. Only the emitting project needs it.
+    "rootDir": "./src"
   },
   "include": ["src/shared/**/*.ts", "src/storage/**/*.ts", "src/server/**/*.ts", "src/cli/**/*.ts", "src/cli/**/*.tsx"],
   "exclude": ["src/**/*.test.ts", "node_modules", "dist"]
