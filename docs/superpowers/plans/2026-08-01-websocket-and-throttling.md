@@ -2746,11 +2746,28 @@ function serializeWsMessage(m: WebSocketMessage): Record<string, unknown> {
 ```
 ```ts
   router.get('/requests/:id/messages', (req: Request, res: Response) => {
-    const limit = req.query.limit ? parseInt(req.query.limit as string, 10) : 500;
-    const offset = req.query.offset ? parseInt(req.query.offset as string, 10) : 0;
+    // Validate before hitting SQL: `parseInt('abc')` is NaN, which reaches
+    // `LIMIT @limit` as an invalid bind and surfaces as an opaque 500.
+    const limit = parsePositiveInt(req.query.limit, 500);
+    const offset = parsePositiveInt(req.query.offset, 0);
+    if (limit === null || offset === null) {
+      res.status(400).json({ error: 'limit and offset must be non-negative integers' });
+      return;
+    }
     const result = db.getWebSocketMessages(req.params.id as string, limit, offset);
     res.json({ ...result, data: result.data.map(serializeWsMessage) });
   });
+```
+
+with this helper alongside `serializeWsMessage`:
+
+```ts
+/** Returns the parsed value, the fallback when absent, or null when invalid. */
+function parsePositiveInt(raw: unknown, fallback: number): number | null {
+  if (raw === undefined) return fallback;
+  const n = Number(raw);
+  return Number.isInteger(n) && n >= 0 ? n : null;
+}
 ```
 
 Extend the `/events` handler to forward the new channel:
@@ -2865,12 +2882,17 @@ export function formatWsMessages(
   result: PaginatedResponse<WebSocketMessage>,
   format: string,
 ): string {
-  if (format === 'json') {
+  if (format === 'json' || format === 'agent') {
     return JSON.stringify(
       {
         ...result,
         data: result.data.map((m) => ({
           ...m,
+          // Always state the encoding. Emitting utf8 for text and base64 for
+          // binary under the same key name leaves a consumer unable to tell
+          // which it got, and silently mangles any text frame that isn't valid
+          // UTF-8. Machine-readable output must never be ambiguous.
+          payload_encoding: m.opcode === 'binary' ? 'base64' : 'utf8',
           payload: m.payload
             ? m.opcode === 'binary'
               ? Buffer.from(m.payload).toString('base64')
@@ -2902,12 +2924,22 @@ export function formatWsMessages(
 
 export function formatWsMessageLine(message: WebSocketMessage, format: string): string {
   if (format === 'json' || format === 'agent') {
+    // Machine-readable streaming output carries the full payload, not a preview:
+    // a silently truncated value is worse than a large one for a consumer that
+    // may be matching on content. `truncated` still reflects storage clipping.
+    const full = message.payload ? Buffer.from(message.payload) : null;
     return JSON.stringify({
       direction: message.direction,
       opcode: message.opcode,
       size: message.size,
       timestamp: message.timestamp,
-      payload: wsPayloadPreview(message, 500),
+      truncated: message.truncated,
+      payload_encoding: message.opcode === 'binary' ? 'base64' : 'utf8',
+      payload: full
+        ? message.opcode === 'binary'
+          ? full.toString('base64')
+          : full.toString('utf8')
+        : null,
     });
   }
   const arrow = message.direction === 'sent' ? '→' : '←';
@@ -3049,6 +3081,35 @@ git commit -m "feat: add laurel-proxy messages command"
 ---
 
 ### Task 12: WebSocket connection replay
+
+**First, fix a pre-existing bug that replay depends on: recorded HTTPS URLs drop the port.**
+
+`resolveMitmTarget` in `src/server/exchange.ts` builds ``url: `https://${hostname}${rawPath}` `` with no port. So traffic to `https://api.example.com:8443/v1` is recorded as `https://api.example.com/v1`. This predates this project — the original `handleMitmRequest` did the same and Task 1 preserved it faithfully — but it is genuinely wrong, and it breaks replay in two places:
+
+- **The existing HTTP Repeater** already replays `record.url` (`src/server/replay.ts:22`), so replaying any HTTPS capture from a non-443 port silently hits 443 instead. That is a live bug in a shipped feature.
+- **WebSocket replay** would inherit it, since `recordToWsReplayRequest` derives its `ws(s)://` URL from `record.url`.
+
+Fix `resolveMitmTarget` to include the port when it is not the default:
+
+```ts
+export function resolveMitmTarget(hostname: string, port: number, rawPath: string): ExchangeTarget {
+  // Include a non-default port in the recorded URL. Omitting it makes replay of
+  // any non-443 HTTPS capture silently target 443 — both for the HTTP Repeater
+  // and for WebSocket replay, which derive their target from this URL.
+  const authority = port === 443 ? hostname : `${hostname}:${port}`;
+  return {
+    hostname,
+    port,
+    protocol: 'https',
+    url: `https://${authority}${rawPath}`,
+    path: rawPath,
+  };
+}
+```
+
+Add a test in `src/server/exchange.test.ts` asserting a non-default port survives into `url` while 443 stays absent. Then check the existing WebSocket integration test's URL assertion (it asserts `https://localhost/wss` for an ephemeral-port server) and update it to expect the port — if it still passes unchanged, the fix isn't working.
+
+This is a deliberate, scoped widening of Task 12: replay is where the bug becomes visible, so fixing it here rather than shipping a replay feature known to target the wrong port.
 
 **Files:**
 - Create: `src/server/ws-replay.ts`
@@ -3294,18 +3355,25 @@ export function replayWebSocket(request: WsReplayRequest): Promise<WsReplayRespo
       quietTimer = setTimeout(() => finish(), QUIET_PERIOD);
     };
 
+    // `onopen` is async, so anything that throws inside it becomes an unhandled
+    // rejection that never settles the outer promise — the caller would hang
+    // until the hard timeout with no explanation. Catch and finish explicitly.
     socket.onopen = async () => {
-      for (const frame of request.frames) {
-        if (settled) return;
-        if (frame.delayMs > 0) {
-          await new Promise((r) => setTimeout(r, frame.delayMs));
+      try {
+        for (const frame of request.frames) {
+          if (settled) return;
+          if (frame.delayMs > 0) {
+            await new Promise((r) => setTimeout(r, frame.delayMs));
+          }
+          if (settled) return;
+          const bytes = Buffer.from(frame.payload, 'base64');
+          socket.send(frame.opcode === 'text' ? bytes.toString('utf8') : bytes);
+          sentCount++;
         }
-        if (settled) return;
-        const bytes = Buffer.from(frame.payload, 'base64');
-        socket.send(frame.opcode === 'text' ? bytes.toString('utf8') : bytes);
-        sentCount++;
+        armQuietTimer();
+      } catch (err) {
+        finish(`Failed while sending frames: ${(err as Error).message}`);
       }
-      armQuietTimer();
     };
 
     socket.onmessage = (event: MessageEvent) => {
