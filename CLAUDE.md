@@ -5,7 +5,17 @@ HTTP/HTTPS intercepting proxy with CLI, web UI, REST API, and Claude Code plugin
 ## Project Structure
 
 - `main` branch: proxy source code, CLI, server, web UI, tests
-- `website` branch: Astro landing page + docs site, deployed to GitHub Pages at robinvanbaalen.nl/laurel-proxy/
+- Website: separate repo at github.com/rvanbaalen/laurelproxy-website, deployed to GitHub Pages
+
+## Features
+
+- **Bandwidth throttling** — simulate slow networks (56k/edge/3g/4g/dsl/wifi presets
+  or custom rates). See `docs/throttling.md` — read it before trusting `duration` on
+  a request captured while throttling is enabled.
+- **WebSocket capture and replay** — frames captured alongside HTTP traffic, with
+  CLI/UI viewers and connection replay. See `docs/websocket.md` — has a known
+  silent-recording-degradation gap and a base64-vs-UTF-8 inconsistency between the
+  REST API and CLI output.
 
 ## Git Workflow
 
