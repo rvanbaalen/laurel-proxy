@@ -135,14 +135,18 @@ export async function setThrottle(
 /**
  * Which dropdown option the current throttle settings correspond to.
  *
- * - 'off' when throttling is disabled (or state hasn't loaded).
+ * - 'unknown' when state hasn't loaded yet, or the fetch failed. This must NOT
+ *   collapse into 'off': claiming "disabled" when the real state is unknown
+ *   misreports it, exactly as misreporting a custom rate as 'off' would.
+ * - 'off' when throttling is confirmed disabled.
  * - a preset key only when all three values (down/up/latency) match exactly —
  *   a partial match (e.g. right downKbps, wrong latencyMs) is NOT a preset.
  * - 'custom' when enabled but no preset matches exactly. This is reachable
  *   because the CLI/API accept arbitrary --down/--up/--latency values.
  */
 export function activePreset(state: ThrottleState | null): string {
-  if (!state || !state.settings.enabled) return 'off';
+  if (!state) return 'unknown';
+  if (!state.settings.enabled) return 'off';
   const { downKbps, upKbps, latencyMs } = state.settings;
   const match = Object.entries(state.presets).find(
     ([, p]) => p.downKbps === downKbps && p.upKbps === upKbps && p.latencyMs === latencyMs,

@@ -119,9 +119,11 @@ export function Controls({ onClear, statusEvent, activeView, onViewChange, repea
         value={preset}
         onChange={(e) => onPresetChange(e.target.value)}
         title={
-          throttleEnabled
-            ? `Throttling enabled (${preset}) — recorded durations include simulated delay`
-            : 'Throttling disabled — select a network profile to simulate a slower connection'
+          preset === 'unknown'
+            ? 'Throttle state unavailable'
+            : throttleEnabled
+              ? `Throttling enabled (${preset}) — recorded durations include simulated delay`
+              : 'Throttling disabled — select a network profile to simulate a slower connection'
         }
         className={`px-2.5 py-1 rounded-full text-[11px] font-medium border outline-none cursor-pointer transition-colors ${
           throttleEnabled
@@ -129,6 +131,7 @@ export function Controls({ onClear, statusEvent, activeView, onViewChange, repea
             : 'bg-bg-secondary text-text-muted border-border hover:border-text-muted hover:text-text-secondary'
         }`}
       >
+        {preset === 'unknown' && <option value="unknown" disabled>…</option>}
         <option value="off">No Throttle</option>
         {Object.keys(throttle?.presets ?? {}).map((key) => (
           <option key={key} value={key}>{key}</option>

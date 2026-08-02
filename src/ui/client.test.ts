@@ -21,8 +21,12 @@ describe('activePreset', () => {
     expect(activePreset(s)).toBe('off');
   });
 
-  it('returns "off" when state is null', () => {
-    expect(activePreset(null)).toBe('off');
+  it('returns "unknown" when state is null (not yet loaded, or fetch failed)', () => {
+    // This must NOT collapse into 'off' — an unloaded/failed fetch is not the
+    // same claim as "throttling is confirmed disabled", and misreporting one
+    // as the other is the same failure class the custom-vs-off case guards
+    // against, just with 'unknown' in place of 'custom'.
+    expect(activePreset(null)).toBe('unknown');
   });
 
   it('returns the matching preset key when enabled settings exactly match a preset', () => {
