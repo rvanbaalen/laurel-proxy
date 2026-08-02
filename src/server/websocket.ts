@@ -208,7 +208,22 @@ export function handleWebSocketUpgrade(
     });
   };
 
-  upstreamReq.on('response', (upstreamRes) => { void relayRefusal(upstreamRes); });
+  /**
+   * The net under the refusal relay, mirroring `ProxyServer.dispatchExchange`.
+   *
+   * `relayRefusal` is started with `void`, so anything it throws outside the
+   * guards it already has is an unhandled rejection and therefore a process exit.
+   * A lost refusal recording is the acceptable cost; the process is not. There is
+   * no `ServerResponse` here to write a status onto — this socket has either
+   * carried a response head already or is about to carry nothing at all — so the
+   * client is told by the only means left, a reset, rather than being left to
+   * wait out its own timeout.
+   */
+  upstreamReq.on('response', (upstreamRes) => {
+    void relayRefusal(upstreamRes).catch(() => {
+      try { clientSocket.destroy(); } catch { /* nothing left to try */ }
+    });
+  });
 
   upstreamReq.on('error', () => {
     // Mirrors the HTTP path's 502 so the client gets an answer rather than a

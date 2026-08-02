@@ -7,6 +7,7 @@ import type { WebSocketDeps } from './websocket.js';
 import { resolveHttpTarget } from './exchange.js';
 import { DEFAULT_CONFIG } from '../shared/types.js';
 import type { Config } from '../shared/types.js';
+import type { Throttler } from './throttle.js';
 import { startRawWsServer, echoHandler } from '../../tests/helpers/ws-server.js';
 import { encodeFrame } from '../../tests/helpers/ws-frames.js';
 import { watchProcessErrors } from '../../tests/helpers/process-errors.js';
@@ -320,6 +321,53 @@ describe('handleWebSocketUpgrade recording failures', () => {
       expect(client.head()).toContain('426');
       expect(client.body().toString()).toBe('first-second-third');
       expect(escaped).toEqual([]);
+      expect(onRecord).not.toHaveBeenCalled();
+    } finally {
+      proxy.close();
+      upstream.close();
+    }
+  });
+
+  it('closes the client out instead of the process when the refusal relay throws off the recording path', async () => {
+    // `relayRefusal` is dispatched with `void`, so a throw from anywhere in it
+    // that its own guards don't cover is an unhandled rejection — a process exit
+    // on Node 22. The latency delay is such a place: it is awaited before
+    // anything has been written to the client, outside every recording guard.
+    // Driving it through the public `throttle` dep stands in for any future
+    // unguarded throw in the same window.
+    const onRecord = vi.fn();
+    const upstream = http.createServer((_req, res) => {
+      res.writeHead(426, { 'Content-Type': 'text/plain' });
+      res.end('upgrade required');
+    });
+    await new Promise<void>((r) => upstream.listen(0, '127.0.0.1', () => r()));
+    const upstreamPort = (upstream.address() as net.AddressInfo).port;
+    const proxy = await startProxy(passiveDeps({
+      onRecord,
+      throttle: {
+        up: { consume: async () => {} },
+        down: { consume: async () => {} },
+        delayLatency: async () => { throw new Error('latency injection exploded'); },
+      } as unknown as Throttler,
+    }));
+
+    try {
+      const client = connectUpgrade(
+        proxy.port,
+        `http://127.0.0.1:${upstreamPort}/refused-throwing`,
+        `127.0.0.1:${upstreamPort}`,
+      );
+      const escaped = await watchProcessErrors(async () => {
+        // The client must not be left holding an open socket until its own
+        // timeout: a reset is all that can be said this late, but silence is not
+        // an option. `waitForClose` rejects on its own 3s deadline if it hangs.
+        await client.waitForClose();
+      });
+
+      expect(escaped).toEqual([]);
+      // Nothing was relayed and nothing was recorded — the exchange is lost, as
+      // designed. Only the process and the client's attention are protected.
+      expect(client.head()).toBe('');
       expect(onRecord).not.toHaveBeenCalled();
     } finally {
       proxy.close();

@@ -55,6 +55,58 @@ export function resolveMitmTarget(hostname: string, port: number, rawPath: strin
   };
 }
 
+/**
+ * The status to put on the wire for an upstream response.
+ *
+ * Node's HTTP *client* parser and its HTTP *server* writer do not agree on what
+ * a status code may be. The parser accepts any three-digit status line, so
+ * `HTTP/1.1 000` arrives as `statusCode === 0`; the writer rejects anything
+ * outside 100–999 with a `RangeError [ERR_HTTP_INVALID_STATUS_CODE]`. Forwarding
+ * the parsed value verbatim therefore throws out of an exchange nobody is
+ * awaiting, which on Node 22 is a process exit — over one malformed byte from
+ * upstream.
+ *
+ * A clamp rather than `|| 500`: `||` only rescues `0`, and every other
+ * unsendable value the parser can produce (`HTTP/1.1 042` → `42`) would still
+ * throw. This substitutes a status only for what cannot be sent, and only on the
+ * wire — the record keeps `proxyRes.statusCode` as upstream stated it, so a
+ * capture of a malformed response stays an accurate capture.
+ */
+export function sendableStatus(statusCode: number | undefined): number {
+  if (statusCode === undefined || !Number.isInteger(statusCode)) return 500;
+  return statusCode >= 100 && statusCode <= 999 ? statusCode : 500;
+}
+
+/**
+ * Answers — or gives up on — a client whose exchange threw somewhere the
+ * pipeline did not expect.
+ *
+ * `handleExchange` is dispatched with `void`, so a rejection reaches no caller
+ * and Node 22 ends the process. Catching it at the dispatch site converts that
+ * class of process exits into a class of lost exchanges, but only half the
+ * problem is the process: the client is still holding a socket that will never
+ * be written to, and would sit there until its own timeout. So the catch also
+ * closes the response out — a 502 while a status line can still be sent,
+ * otherwise a reset, which is the only remaining way to tell a client that the
+ * body it is reading will not be completed.
+ *
+ * Its own failures are swallowed: a throw from inside a `.catch()` handler is
+ * another unhandled rejection, i.e. the exact thing this exists to prevent.
+ */
+export function failExchange(clientRes: http.ServerResponse): void {
+  try {
+    if (clientRes.writableEnded || clientRes.destroyed) return;
+    if (!clientRes.headersSent) {
+      clientRes.writeHead(502);
+      clientRes.end('Bad Gateway');
+      return;
+    }
+    clientRes.destroy();
+  } catch {
+    // Nothing left to try, and no logging channel in this codebase to say so.
+  }
+}
+
 function readBody(stream: http.IncomingMessage): Promise<Buffer> {
   return new Promise((resolve, reject) => {
     const chunks: Buffer[] = [];
@@ -131,7 +183,7 @@ export async function handleExchange(
   // chunked as we stream — that's correct proxy behaviour (we genuinely are
   // chunking) and keeps the connection reusable for keep-alive.
   delete resHeaders['transfer-encoding'];
-  clientRes.writeHead(proxyRes.statusCode ?? 500, resHeaders);
+  clientRes.writeHead(sendableStatus(proxyRes.statusCode), resHeaders);
 
   const captured: Buffer[] = [];
   let capturedLength = 0;

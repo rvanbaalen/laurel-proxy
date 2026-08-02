@@ -7,8 +7,8 @@ import type { EventManager } from './events.js';
 import type { Config, RequestRecord, WebSocketMessage } from '../shared/types.js';
 import { listenWithRetry } from './port-utils.js';
 import { recordSafely } from '../shared/never-fatal.js';
-import { handleExchange, resolveHttpTarget, resolveMitmTarget } from './exchange.js';
-import type { ExchangeDeps } from './exchange.js';
+import { failExchange, handleExchange, resolveHttpTarget, resolveMitmTarget } from './exchange.js';
+import type { ExchangeDeps, ExchangeTarget } from './exchange.js';
 import { handleWebSocketUpgrade } from './websocket.js';
 import type { WebSocketDeps } from './websocket.js';
 import type { Throttler } from './throttle.js';
@@ -145,6 +145,27 @@ export class ProxyServer {
     };
   }
 
+  /**
+   * The net under the exchange pipeline.
+   *
+   * The recording work inside `handleExchange` is guarded record by record, but
+   * the pipeline around it is not: any unexpected throw between `writeHead` and
+   * `end()` rejects a promise nobody awaits, and Node 22 turns that into a
+   * process exit. This is the same trade the recording guard makes one layer in —
+   * lose the exchange, keep the proxy — extended to the whole dispatch, so a
+   * future edit to the pipeline cannot reintroduce a process-death path by
+   * throwing somewhere new. `failExchange` also closes the client out, so a lost
+   * exchange is not additionally a hung client.
+   */
+  private dispatchExchange(
+    clientReq: http.IncomingMessage,
+    clientRes: http.ServerResponse,
+    target: ExchangeTarget,
+  ): void {
+    void handleExchange(clientReq, clientRes, target, this.exchangeDeps)
+      .catch(() => failExchange(clientRes));
+  }
+
   private handleRequest(clientReq: http.IncomingMessage, clientRes: http.ServerResponse): void {
     const target = resolveHttpTarget(clientReq.url || '/');
     if (!target) {
@@ -152,7 +173,7 @@ export class ProxyServer {
       clientRes.end('Bad Request');
       return;
     }
-    void handleExchange(clientReq, clientRes, target, this.exchangeDeps);
+    this.dispatchExchange(clientReq, clientRes, target);
   }
 
   private handleConnect(req: http.IncomingMessage, clientSocket: net.Socket, _head: Buffer): void {
@@ -177,7 +198,7 @@ export class ProxyServer {
 
       const virtualServer = http.createServer((clientReq, clientRes) => {
         const target = resolveMitmTarget(hostname, port, clientReq.url || '/');
-        void handleExchange(clientReq, clientRes, target, this.exchangeDeps);
+        this.dispatchExchange(clientReq, clientRes, target);
       });
 
       // wss:// arrives as an upgrade request inside the tunnel, so the virtual

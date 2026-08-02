@@ -9,6 +9,7 @@ import { CertificateAuthority } from './ssl.js';
 import { EventManager } from './events.js';
 import { DEFAULT_CONFIG } from '../shared/types.js';
 import type { Config, RequestRecord, WebSocketMessage } from '../shared/types.js';
+import type { Throttler } from './throttle.js';
 import { startRawWsServer, echoHandler } from '../../tests/helpers/ws-server.js';
 import { encodeFrame } from '../../tests/helpers/ws-frames.js';
 import { watchProcessErrors } from '../../tests/helpers/process-errors.js';
@@ -54,6 +55,30 @@ function httpGet(url: string, proxyPort: number): Promise<{ status: number; body
       res.on('end', () => resolve({ status: res.statusCode!, body, headers: res.headers }));
     });
     req.on('error', reject);
+    req.end();
+  });
+}
+
+function httpPost(url: string, proxyPort: number, body: string): Promise<{ status: number; body: string }> {
+  return new Promise((resolve, reject) => {
+    const proxyUrl = new URL(url);
+    const req = http.request({
+      host: '127.0.0.1',
+      port: proxyPort,
+      method: 'POST',
+      path: url,
+      headers: {
+        Host: proxyUrl.hostname,
+        'Content-Type': 'text/plain',
+        'Content-Length': Buffer.byteLength(body).toString(),
+      },
+    }, (res) => {
+      let responseBody = '';
+      res.on('data', (chunk: Buffer) => { responseBody += chunk; });
+      res.on('end', () => resolve({ status: res.statusCode!, body: responseBody }));
+    });
+    req.on('error', reject);
+    req.write(body);
     req.end();
   });
 }
@@ -537,6 +562,135 @@ describe('ProxyServer - recording failures', () => {
       upstream.close();
     }
   });
+});
+
+/** Answers every request with a caller-supplied raw HTTP response, byte for byte. */
+function createRawResponseServer(response: string): Promise<net.Server> {
+  return new Promise((resolve) => {
+    const server = net.createServer((socket) => {
+      socket.on('error', () => {});
+      socket.once('data', () => {
+        socket.write(response);
+        socket.end();
+      });
+    });
+    server.listen(0, '127.0.0.1', () => resolve(server));
+  });
+}
+
+/**
+ * Resolves to `'HUNG'` if `work` has not settled within `ms`.
+ *
+ * A client left waiting on a socket nobody will ever write to is the *second*
+ * half of an escaped throw in the exchange pipeline, and it is invisible to a
+ * bare `await`: the test would fail on its own timeout with no indication of
+ * which property broke. Racing a sentinel makes "the client was answered" an
+ * assertion rather than a side effect of the runner finishing.
+ */
+function orHang<T>(work: Promise<T>, ms = 3000): Promise<T | 'HUNG'> {
+  return Promise.race([work, sleep(ms).then(() => 'HUNG' as const)]);
+}
+
+/**
+ * Everything between `writeHead` and `end()` in `handleExchange` runs with no
+ * caller: `proxy.ts` dispatches it as `void handleExchange(...)`, and Node 22
+ * turns an unhandled rejection into a process exit. These tests pin the two
+ * halves of that guarantee — the process survives, *and* the client is not left
+ * holding a socket that will never be written to.
+ */
+describe('ProxyServer - pipeline escapes', () => {
+  let proxy: ProxyServer;
+  let db: Database;
+  let events: EventManager;
+  let dbPath: string;
+  let caDir: string;
+  let proxyPort: number;
+
+  beforeEach(async () => {
+    dbPath = path.join(os.tmpdir(), `laurel-proxy-escape-${randomUUID()}.db`);
+    caDir = path.join(os.tmpdir(), `laurel-proxy-ca-escape-${randomUUID()}`);
+    db = new Database(dbPath);
+    events = new EventManager();
+    const ca = new CertificateAuthority(caDir, 10);
+    ca.init();
+    const config: Config = { ...DEFAULT_CONFIG, proxyPort: 0, dbPath, maxBodySize: 1024 * 1024 };
+    proxy = new ProxyServer(db, ca, events, config);
+    proxyPort = await proxy.start();
+  });
+
+  afterEach(async () => {
+    await proxy.stop();
+    events.stop();
+    db.close();
+    fs.rmSync(caDir, { recursive: true, force: true });
+    for (const suffix of ['', '-wal', '-shm']) {
+      try { fs.unlinkSync(dbPath + suffix); } catch {}
+    }
+  });
+
+  it('survives an upstream status code its own response writer would reject', async () => {
+    // `000` is a syntactically valid status line — three digits — so Node's HTTP
+    // *client* parser accepts it and reports `statusCode === 0`. Node's HTTP
+    // *server* writer rejects anything outside 100–999 with a RangeError, so
+    // forwarding the parsed value verbatim throws from `writeHead`, escapes an
+    // exchange nobody is awaiting, and ends the process.
+    const upstream = await createRawResponseServer(
+      'HTTP/1.1 000 Weird\r\nContent-Length: 2\r\nConnection: close\r\n\r\nhi',
+    );
+    const upstreamPort = (upstream.address() as net.AddressInfo).port;
+    let result: Awaited<ReturnType<typeof httpGet>> | 'HUNG' | undefined;
+
+    try {
+      const escaped = await watchProcessErrors(async () => {
+        result = await orHang(httpGet(`http://127.0.0.1:${upstreamPort}/weird`, proxyPort));
+        await sleep(250);
+      });
+
+      expect(escaped).toEqual([]);
+      // The client is answered rather than left on an open socket until its own
+      // timeout, and answered with a status its own parser accepts.
+      expect(result).not.toBe('HUNG');
+      const answered = result as Awaited<ReturnType<typeof httpGet>>;
+      expect(answered.status).toBe(500);
+      expect(answered.body).toBe('hi');
+
+      // Substituting a sendable status for the client must not falsify the
+      // capture: the record keeps what upstream actually said.
+      expect(db.query({}).data.map((r) => r.status)).toEqual([0]);
+    } finally {
+      upstream.close();
+    }
+  }, 20_000);
+
+  it('fails the client response instead of the process when the exchange throws off the recording path', async () => {
+    // A throw from anywhere in the pipeline that is not the recording — here the
+    // upload pacing, which runs before the upstream request is even made — has
+    // no caller to catch it. Rather than reach for an unreachable internal, this
+    // drives it through the public `setThrottler` seam with a limiter that
+    // rejects, standing in for any future unguarded throw in the same window.
+    proxy.setThrottler({
+      up: { consume: async () => { throw new Error('limiter exploded'); } },
+      down: { consume: async () => {} },
+      delayLatency: async () => {},
+    } as unknown as Throttler);
+
+    const target = await createTargetServer();
+    const targetPort = (target.address() as net.AddressInfo).port;
+    let result: { status: number; body: string } | 'HUNG' | undefined;
+
+    try {
+      const escaped = await watchProcessErrors(async () => {
+        result = await orHang(httpPost(`http://127.0.0.1:${targetPort}/echo`, proxyPort, 'payload'));
+        await sleep(250);
+      });
+
+      expect(escaped).toEqual([]);
+      expect(result).not.toBe('HUNG');
+      expect((result as { status: number }).status).toBe(502);
+    } finally {
+      target.close();
+    }
+  }, 20_000);
 });
 
 describe('CertificateAuthority', () => {

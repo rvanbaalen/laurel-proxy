@@ -1,7 +1,7 @@
 import { describe, it, expect, vi } from 'vitest';
 import http from 'node:http';
 import type net from 'node:net';
-import { resolveHttpTarget, resolveMitmTarget, handleExchange } from './exchange.js';
+import { resolveHttpTarget, resolveMitmTarget, handleExchange, sendableStatus } from './exchange.js';
 import { DEFAULT_CONFIG } from '../shared/types.js';
 import type { Config, RequestRecord } from '../shared/types.js';
 import { watchProcessErrors } from '../../tests/helpers/process-errors.js';
@@ -47,6 +47,27 @@ describe('resolveMitmTarget', () => {
     expect(resolveMitmTarget('api.example.com', 443, '/v1').url).toBe(
       'https://api.example.com/v1',
     );
+  });
+});
+
+describe('sendableStatus', () => {
+  it('passes through everything Node\'s response writer accepts', () => {
+    for (const status of [100, 200, 404, 500, 599, 999]) {
+      expect(sendableStatus(status)).toBe(status);
+    }
+  });
+
+  it('substitutes 500 for a parsed status the writer would reject', () => {
+    // Node's client parser accepts any three-digit status line, so these are all
+    // reachable from a real upstream: `000` parses to 0 and `042` to 42. Node's
+    // server writer throws a RangeError for anything outside 100–999, and that
+    // throw escapes an exchange nobody awaits — i.e. it ends the process.
+    // `|| 500` would have rescued only the 0.
+    expect(sendableStatus(0)).toBe(500);
+    expect(sendableStatus(42)).toBe(500);
+    expect(sendableStatus(99)).toBe(500);
+    expect(sendableStatus(1000)).toBe(500);
+    expect(sendableStatus(undefined)).toBe(500);
   });
 });
 
