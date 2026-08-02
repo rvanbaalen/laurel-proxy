@@ -7,7 +7,7 @@ import { Database } from '../storage/db.js';
 import { EventManager } from './events.js';
 import { Throttler } from './throttle.js';
 import { getConfigPath } from './config.js';
-import type { RequestRecord } from '../shared/types.js';
+import type { RequestRecord, WebSocketMessage } from '../shared/types.js';
 import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
@@ -56,6 +56,63 @@ function httpReq(
     if (payload !== undefined) req.write(payload);
     req.end();
   });
+}
+
+/**
+ * Buffers a `text/event-stream` response and lets a test await a specific
+ * `event:` block by name, regardless of how the underlying chunks happen to
+ * split across `data` events. Frames already received before `waitFor` is
+ * called are queued so ordering doesn't matter.
+ */
+function collectSse(res: http.IncomingMessage) {
+  let buffer = '';
+  const waiters: Array<{ event: string; resolve: (data: string) => void }> = [];
+  const queued: Record<string, string[]> = {};
+
+  res.on('data', (chunk: Buffer) => {
+    buffer += chunk.toString('utf-8');
+    let boundary: number;
+    while ((boundary = buffer.indexOf('\n\n')) !== -1) {
+      const raw = buffer.slice(0, boundary);
+      buffer = buffer.slice(boundary + 2);
+      const eventMatch = raw.match(/^event: (.+)$/m);
+      const dataMatch = raw.match(/^data: (.+)$/m);
+      const event = eventMatch ? eventMatch[1] : 'message';
+      const data = dataMatch ? dataMatch[1] : '';
+      const waiterIndex = waiters.findIndex((w) => w.event === event);
+      if (waiterIndex !== -1) {
+        const [waiter] = waiters.splice(waiterIndex, 1);
+        waiter.resolve(data);
+      } else {
+        (queued[event] ??= []).push(data);
+      }
+    }
+  });
+
+  return {
+    waitFor(event: string): Promise<string> {
+      const already = queued[event]?.shift();
+      if (already !== undefined) return Promise.resolve(already);
+      return new Promise((resolve) => waiters.push({ event, resolve }));
+    },
+  };
+}
+
+/** Spies on ws-message (un)subscription so a test can assert the SSE handler
+ * actually cleans up its subscription on connection close, rather than just
+ * asserting on side effects that would pass whether or not the leak exists. */
+class SpyEventManager extends EventManager {
+  wsSubscribeCalls = 0;
+  wsUnsubscribeCalls = 0;
+
+  subscribeWsMessages(fn: (messages: WebSocketMessage[]) => void): () => void {
+    this.wsSubscribeCalls++;
+    const unsub = super.subscribeWsMessages(fn);
+    return () => {
+      this.wsUnsubscribeCalls++;
+      unsub();
+    };
+  }
 }
 
 describe('REST API', () => {
@@ -144,6 +201,83 @@ describe('REST API', () => {
   it('GET /api/requests/:id returns 404 for unknown id', async () => {
     const res = await httpReq(port, '/api/requests/nonexistent');
     expect(res.status).toBe(404);
+  });
+
+  it('GET /api/requests/:id/messages returns base64 payloads', async () => {
+    db.insert(makeRequest({ id: 'ws-1', kind: 'websocket', status: 101 }));
+    db.insertWebSocketMessages([
+      { id: 'm1', request_id: 'ws-1', timestamp: 1, direction: 'sent',
+        opcode: 'text', payload: Buffer.from('hello'), size: 5, truncated: 0 },
+    ]);
+    const res = await httpReq(port, '/api/requests/ws-1/messages');
+    expect(res.status).toBe(200);
+    const body = JSON.parse(res.body);
+    expect(body.total).toBe(1);
+    expect(body.data[0].request_id).toBe('ws-1');
+    expect(Buffer.from(body.data[0].payload, 'base64').toString()).toBe('hello');
+  });
+
+  it('GET /api/requests/:id/messages returns an empty page for unknown ids', async () => {
+    // Deliberate: an unknown id is indistinguishable, from this endpoint's
+    // point of view, from a known websocket request that hasn't received any
+    // frames yet — both are "zero messages for this id". Mirrors how
+    // `GET /api/requests?host=nomatch` returns `total: 0` rather than 404.
+    const res = await httpReq(port, '/api/requests/nope/messages');
+    expect(res.status).toBe(200);
+    const body = JSON.parse(res.body);
+    expect(body.total).toBe(0);
+    expect(body.data).toEqual([]);
+  });
+
+  it('GET /api/requests/:id/messages keeps a null payload null, not an empty string', async () => {
+    db.insert(makeRequest({ id: 'ws-2', kind: 'websocket', status: 101 }));
+    db.insertWebSocketMessages([
+      { id: 'm2', request_id: 'ws-2', timestamp: 1, direction: 'received',
+        opcode: 'close', payload: null, size: 0, truncated: 0 },
+    ]);
+    const res = await httpReq(port, '/api/requests/ws-2/messages');
+    const body = JSON.parse(res.body);
+    expect(body.data[0].payload).toBeNull();
+  });
+
+  it('GET /api/requests/:id/messages distinguishes a zero-length payload from an absent one', async () => {
+    db.insert(makeRequest({ id: 'ws-3', kind: 'websocket', status: 101 }));
+    db.insertWebSocketMessages([
+      { id: 'm3', request_id: 'ws-3', timestamp: 1, direction: 'sent',
+        opcode: 'ping', payload: Buffer.alloc(0), size: 0, truncated: 0 },
+    ]);
+    const res = await httpReq(port, '/api/requests/ws-3/messages');
+    const body = JSON.parse(res.body);
+    expect(body.data[0].payload).toBe('');
+    expect(body.data[0].payload).not.toBeNull();
+  });
+
+  it('GET /api/requests/:id/messages rejects a non-numeric limit instead of hitting SQL with NaN', async () => {
+    db.insert(makeRequest({ id: 'ws-4', kind: 'websocket', status: 101 }));
+    const res = await httpReq(port, '/api/requests/ws-4/messages?limit=abc');
+    expect(res.status).toBe(400);
+    const body = JSON.parse(res.body);
+    expect(body.error).toMatch(/non-negative integers/);
+  });
+
+  it('GET /api/requests/:id/messages rejects a negative offset', async () => {
+    db.insert(makeRequest({ id: 'ws-4', kind: 'websocket', status: 101 }));
+    const res = await httpReq(port, '/api/requests/ws-4/messages?offset=-1');
+    expect(res.status).toBe(400);
+  });
+
+  it('GET /api/requests/:id/messages treats limit=0 as "zero rows", distinct from the default', async () => {
+    db.insert(makeRequest({ id: 'ws-5', kind: 'websocket', status: 101 }));
+    db.insertWebSocketMessages([
+      { id: 'm5', request_id: 'ws-5', timestamp: 1, direction: 'sent',
+        opcode: 'text', payload: Buffer.from('x'), size: 1, truncated: 0 },
+    ]);
+    const res = await httpReq(port, '/api/requests/ws-5/messages?limit=0');
+    expect(res.status).toBe(200);
+    const body = JSON.parse(res.body);
+    expect(body.limit).toBe(0);
+    expect(body.total).toBe(1);
+    expect(body.data).toEqual([]);
   });
 
   it('DELETE /api/requests clears all', async () => {
@@ -352,5 +486,88 @@ describe('REST API throttle endpoints without a throttler wired', () => {
   it('PUT /api/throttle returns 503 when no throttler is wired', async () => {
     const res = await httpReq(port, '/api/throttle', 'PUT', { preset: '3g' });
     expect(res.status).toBe(503);
+  });
+});
+
+describe('REST API SSE ws-message forwarding', () => {
+  let db: Database;
+  let dbPath: string;
+  let events: SpyEventManager;
+  let server: http.Server;
+  let port: number;
+
+  beforeEach(async () => {
+    dbPath = path.join(os.tmpdir(), `laurel-proxy-api-test-${randomUUID()}.db`);
+    db = new Database(dbPath);
+    events = new SpyEventManager();
+    const app = express();
+    app.use(express.json());
+    const router = createApiRouter(db, events, {
+      getProxyRunning: () => true,
+      getProxyPort: () => 8080,
+      startProxy: async () => {},
+      stopProxy: async () => {},
+    });
+    app.use('/api', router);
+    await new Promise<void>((resolve) => {
+      server = app.listen(0, '127.0.0.1', () => {
+        port = (server.address() as net.AddressInfo).port;
+        resolve();
+      });
+    });
+  });
+
+  afterEach(() => {
+    server.close();
+    events.stop();
+    db.close();
+    try { fs.unlinkSync(dbPath); } catch {}
+    try { fs.unlinkSync(dbPath + '-wal'); } catch {}
+    try { fs.unlinkSync(dbPath + '-shm'); } catch {}
+  });
+
+  it('forwards messages pushed on the EventManager ws-message channel as SSE ws-message events', async () => {
+    const req = http.get({ host: '127.0.0.1', port, path: '/api/events' });
+    const sse = await new Promise<ReturnType<typeof collectSse>>((resolve, reject) => {
+      req.on('response', (res) => resolve(collectSse(res)));
+      req.on('error', reject);
+    });
+
+    try {
+      const message: WebSocketMessage = {
+        id: 'm1', request_id: 'ws-1', timestamp: 1, direction: 'sent',
+        opcode: 'text', payload: Buffer.from('hi'), size: 2, truncated: 0,
+      };
+      events.pushWsMessages([message]);
+
+      const data = await sse.waitFor('ws-message');
+      const parsed = JSON.parse(data);
+      expect(parsed.id).toBe('m1');
+      expect(parsed.request_id).toBe('ws-1');
+      // Confirms JSON.stringify is applied to the whole data object (not just
+      // pieces of it): a base64 payload round-trips intact through the
+      // `data: <json>` line.
+      expect(Buffer.from(parsed.payload, 'base64').toString()).toBe('hi');
+    } finally {
+      req.destroy();
+    }
+  });
+
+  it('unsubscribes the ws-message channel when the SSE connection closes', async () => {
+    const req = http.get({ host: '127.0.0.1', port, path: '/api/events' });
+    await new Promise<void>((resolve, reject) => {
+      req.on('response', () => resolve());
+      req.on('error', reject);
+    });
+
+    expect(events.wsSubscribeCalls).toBe(1);
+    expect(events.wsUnsubscribeCalls).toBe(0);
+
+    req.destroy();
+    // The server's `req.on('close', ...)` cleanup handler runs asynchronously
+    // relative to the client tearing down its own socket, so give it a tick.
+    await new Promise((resolve) => setTimeout(resolve, 50));
+
+    expect(events.wsUnsubscribeCalls).toBe(1);
   });
 });

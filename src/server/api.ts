@@ -4,7 +4,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import type { Database } from '../storage/db.js';
 import type { EventManager } from './events.js';
-import type { RequestFilter, RequestRecord } from '../shared/types.js';
+import type { RequestFilter, RequestRecord, WebSocketMessage } from '../shared/types.js';
 import type { CertificateAuthority } from './ssl.js';
 import type { ReplayRequest } from '../shared/types.js';
 import { replay } from './replay.js';
@@ -29,6 +29,31 @@ function serializeRecord(r: RequestRecord): Record<string, unknown> {
     request_body: r.request_body ? Buffer.from(r.request_body).toString('base64') : null,
     response_body: r.response_body ? Buffer.from(r.response_body).toString('base64') : null,
   };
+}
+
+/**
+ * `m.payload` is truthy for both a populated and a zero-length Buffer (it's
+ * an object either way), so an empty payload correctly base64-encodes to ''
+ * and only a genuinely absent (null) payload stays null.
+ */
+function serializeWsMessage(m: WebSocketMessage): Record<string, unknown> {
+  return {
+    ...m,
+    payload: m.payload ? Buffer.from(m.payload).toString('base64') : null,
+  };
+}
+
+/**
+ * Returns the parsed value, the fallback when the param is absent, or null
+ * when present but not a non-negative integer. `0` is a deliberately valid
+ * value distinct from "absent" — `?limit=0` means "give me zero rows" (still
+ * reporting the true `total`), the same way `?offset=0` already means "start
+ * at the beginning" rather than falling back to a default.
+ */
+function parsePositiveInt(raw: unknown, fallback: number): number | null {
+  if (raw === undefined) return fallback;
+  const n = Number(raw);
+  return Number.isInteger(n) && n >= 0 ? n : null;
 }
 
 export interface ProxyControl {
@@ -80,6 +105,26 @@ export function createApiRouter(
       return;
     }
     res.json(serializeRecord(record));
+  });
+
+  router.get('/requests/:id/messages', (req: Request, res: Response) => {
+    // Validate before hitting SQL: `parseInt('abc')` is NaN, which reaches
+    // `LIMIT @limit` as an invalid bind and surfaces as an opaque 500.
+    const limit = parsePositiveInt(req.query.limit, 500);
+    const offset = parsePositiveInt(req.query.offset, 0);
+    if (limit === null || offset === null) {
+      res.status(400).json({ error: 'limit and offset must be non-negative integers' });
+      return;
+    }
+    // An unknown request id is treated the same as a known id with zero
+    // messages — an empty page, not a 404 — mirroring the plain `/requests`
+    // list endpoint, whose filters that match nothing also return `total: 0`
+    // rather than an error. Since a websocket connection with no captured
+    // frames yet is indistinguishable from a nonexistent id without an extra
+    // db.getById lookup this endpoint has no other reason to make, treating
+    // them alike keeps this a pure collection read.
+    const result = db.getWebSocketMessages(req.params.id as string, limit, offset);
+    res.json({ ...result, data: result.data.map(serializeWsMessage) });
   });
 
   router.delete('/requests', (_req: Request, res: Response) => {
@@ -268,9 +313,16 @@ export function createApiRouter(
       res.write(`event: status\ndata: ${JSON.stringify(status)}\n\n`);
     });
 
+    const unsubWs = events.subscribeWsMessages((messages) => {
+      for (const message of messages) {
+        res.write(`event: ws-message\nid: ${message.id}\ndata: ${JSON.stringify(serializeWsMessage(message))}\n\n`);
+      }
+    });
+
     req.on('close', () => {
       unsubRequest();
       unsubStatus();
+      unsubWs();
     });
   });
 
