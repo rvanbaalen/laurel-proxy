@@ -1,4 +1,8 @@
-export type WsOpcode = 'text' | 'binary' | 'ping' | 'pong' | 'close';
+// The canonical definition lives in shared/types.ts (it's part of the storage
+// and API surface, not just the frame decoder); re-exported here so existing
+// imports from this module keep working.
+import type { WsOpcode } from '../shared/types.js';
+export type { WsOpcode };
 
 export interface WsMessage {
   opcode: WsOpcode;

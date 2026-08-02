@@ -16,6 +16,23 @@ export interface RequestRecord {
   duration: number | null;
   content_type: string | null;
   truncated: number;
+  kind?: RequestKind;
+}
+
+export type RequestKind = 'http' | 'websocket';
+
+export type WsOpcode = 'text' | 'binary' | 'ping' | 'pong' | 'close';
+
+export interface WebSocketMessage {
+  id: string;
+  request_id: string;
+  timestamp: number;
+  /** 'sent' = client→server, 'received' = server→client */
+  direction: 'sent' | 'received';
+  opcode: WsOpcode;
+  payload: Buffer | null;
+  size: number;
+  truncated: number;
 }
 
 export interface ThrottleProfile {

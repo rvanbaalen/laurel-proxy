@@ -5,6 +5,7 @@ import type { RequestRecord } from '../shared/types.js';
 import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
+import BetterSqlite3 from 'better-sqlite3';
 
 function makeRequest(overrides: Partial<RequestRecord> = {}): RequestRecord {
   return {
@@ -28,6 +29,10 @@ function makeRequest(overrides: Partial<RequestRecord> = {}): RequestRecord {
     ...overrides,
   };
 }
+
+// Alias kept for parity with the storage-layer vocabulary used elsewhere
+// (a "base record" is a complete, valid RequestRecord ready to be overridden).
+const baseRecord = makeRequest;
 
 describe('Database', () => {
   let db: Database;
@@ -170,5 +175,159 @@ describe('Database', () => {
     expect(result.data).toHaveLength(1);
     expect(result.data[0].status).toBe(500);
     expect(result.data[0].host).toBe('api.com');
+  });
+
+  it('stores and retrieves websocket messages in timestamp order', () => {
+    db.insert({ ...baseRecord(), id: 'conn-1', kind: 'websocket', status: 101 });
+    db.insertWebSocketMessages([
+      { id: 'm2', request_id: 'conn-1', timestamp: 2000, direction: 'received',
+        opcode: 'text', payload: Buffer.from('pong'), size: 4, truncated: 0 },
+      { id: 'm1', request_id: 'conn-1', timestamp: 1000, direction: 'sent',
+        opcode: 'text', payload: Buffer.from('ping'), size: 4, truncated: 0 },
+    ]);
+
+    const result = db.getWebSocketMessages('conn-1');
+    expect(result.total).toBe(2);
+    expect(result.data.map((m) => m.id)).toEqual(['m1', 'm2']);
+    expect(result.data[0].direction).toBe('sent');
+    expect(Buffer.from(result.data[0].payload!).toString()).toBe('ping');
+  });
+
+  it('scopes messages to their connection', () => {
+    db.insert({ ...baseRecord(), id: 'conn-a', kind: 'websocket' });
+    db.insert({ ...baseRecord(), id: 'conn-b', kind: 'websocket' });
+    db.insertWebSocketMessages([
+      { id: 'x', request_id: 'conn-a', timestamp: 1, direction: 'sent',
+        opcode: 'text', payload: Buffer.from('a'), size: 1, truncated: 0 },
+    ]);
+    expect(db.getWebSocketMessages('conn-b').total).toBe(0);
+  });
+
+  it('paginates messages', () => {
+    db.insert({ ...baseRecord(), id: 'conn-p', kind: 'websocket' });
+    db.insertWebSocketMessages(
+      Array.from({ length: 5 }, (_, i) => ({
+        id: `p${i}`, request_id: 'conn-p', timestamp: i, direction: 'sent' as const,
+        opcode: 'text' as const, payload: Buffer.from(String(i)), size: 1, truncated: 0,
+      })),
+    );
+    const page = db.getWebSocketMessages('conn-p', 2, 2);
+    expect(page.total).toBe(5);
+    expect(page.data.map((m) => m.id)).toEqual(['p2', 'p3']);
+  });
+
+  it('paginates without duplicating or skipping rows when messages share a timestamp', () => {
+    // Frames within a single connection can be recorded within the same
+    // millisecond, so `ORDER BY timestamp ASC` alone leaves ties formally
+    // undefined per SQLite's docs. This guards the pagination math (limit/
+    // offset) doesn't duplicate or drop rows across two calls.
+    db.insert({ ...baseRecord(), id: 'conn-tie', kind: 'websocket' });
+    db.insertWebSocketMessages(
+      Array.from({ length: 6 }, (_, i) => ({
+        id: `t${i}`, request_id: 'conn-tie', timestamp: 1000, direction: 'sent' as const,
+        opcode: 'text' as const, payload: Buffer.from(String(i)), size: 1, truncated: 0,
+      })),
+    );
+
+    const page1 = db.getWebSocketMessages('conn-tie', 3, 0);
+    const page2 = db.getWebSocketMessages('conn-tie', 3, 3);
+    const seen = [...page1.data, ...page2.data].map((m) => m.id);
+    expect(new Set(seen).size).toBe(6); // no duplicates and no gaps across the two pages
+    expect(seen).toEqual(['t0', 't1', 't2', 't3', 't4', 't5']); // stable, insertion-order tiebreak
+  });
+
+  it('defaults kind to http for records that omit it', () => {
+    db.insert({ ...baseRecord(), id: 'plain' });
+    expect((db.getById('plain') as { kind?: string }).kind).toBe('http');
+  });
+
+  it('migrates a database created without the kind column', () => {
+    const legacyPath = path.join(os.tmpdir(), `laurel-proxy-legacy-${randomUUID()}.db`);
+    try {
+      const legacy = new BetterSqlite3(legacyPath);
+      legacy.exec(`
+        CREATE TABLE requests (
+          id TEXT PRIMARY KEY, timestamp INTEGER NOT NULL, method TEXT NOT NULL,
+          url TEXT NOT NULL, host TEXT NOT NULL, path TEXT NOT NULL, protocol TEXT NOT NULL,
+          request_headers TEXT, request_body BLOB, request_size INTEGER, status INTEGER,
+          response_headers TEXT, response_body BLOB, response_size INTEGER,
+          duration INTEGER, content_type TEXT, truncated INTEGER DEFAULT 0
+        );
+      `);
+      legacy.prepare(
+        `INSERT INTO requests (id, timestamp, method, url, host, path, protocol)
+         VALUES ('old', 1, 'GET', 'http://x/', 'x', '/', 'http')`,
+      ).run();
+      legacy.close();
+
+      const migrated = new Database(legacyPath);
+      try {
+        expect((migrated.getById('old') as { kind?: string }).kind).toBe('http');
+        migrated.insert({ ...baseRecord(), id: 'new', kind: 'websocket' });
+        expect((migrated.getById('new') as { kind?: string }).kind).toBe('websocket');
+      } finally {
+        migrated.close();
+      }
+
+      // The migration guard must be a no-op on a database that already has
+      // `kind` — the constructor runs on every CLI invocation, so re-opening
+      // an already-migrated database must never throw (e.g. from a duplicate
+      // `ALTER TABLE ADD COLUMN`).
+      const reopened = new Database(legacyPath);
+      try {
+        expect((reopened.getById('old') as { kind?: string }).kind).toBe('http');
+        expect((reopened.getById('new') as { kind?: string }).kind).toBe('websocket');
+      } finally {
+        reopened.close();
+      }
+    } finally {
+      try { fs.unlinkSync(legacyPath); } catch {}
+      try { fs.unlinkSync(legacyPath + '-wal'); } catch {}
+      try { fs.unlinkSync(legacyPath + '-shm'); } catch {}
+    }
+  });
+
+  it('deletes orphaned websocket messages when their connection ages out', () => {
+    const now = Date.now();
+    db.insert({ ...baseRecord(), id: 'old-conn', kind: 'websocket', timestamp: now - 10000 });
+    db.insert({ ...baseRecord(), id: 'new-conn', kind: 'websocket', timestamp: now });
+    db.insertWebSocketMessages([
+      { id: 'old-msg', request_id: 'old-conn', timestamp: now - 10000, direction: 'sent',
+        opcode: 'text', payload: Buffer.from('a'), size: 1, truncated: 0 },
+      { id: 'new-msg', request_id: 'new-conn', timestamp: now, direction: 'sent',
+        opcode: 'text', payload: Buffer.from('b'), size: 1, truncated: 0 },
+    ]);
+
+    db.deleteOlderThan(now - 5000);
+
+    expect(db.getWebSocketMessages('old-conn').total).toBe(0);
+    expect(db.getWebSocketMessages('new-conn').total).toBe(1);
+  });
+
+  it('deletes orphaned websocket messages when their connection is evicted by deleteOldest', () => {
+    db.insert({ ...baseRecord(), id: 'evict-conn', kind: 'websocket', timestamp: 1 });
+    db.insert({ ...baseRecord(), id: 'keep-conn', kind: 'websocket', timestamp: 2 });
+    db.insertWebSocketMessages([
+      { id: 'evict-msg', request_id: 'evict-conn', timestamp: 1, direction: 'sent',
+        opcode: 'text', payload: Buffer.from('a'), size: 1, truncated: 0 },
+      { id: 'keep-msg', request_id: 'keep-conn', timestamp: 2, direction: 'sent',
+        opcode: 'text', payload: Buffer.from('b'), size: 1, truncated: 0 },
+    ]);
+
+    const deleted = db.deleteOldest(1);
+
+    expect(deleted).toBe(1);
+    expect(db.getWebSocketMessages('evict-conn').total).toBe(0);
+    expect(db.getWebSocketMessages('keep-conn').total).toBe(1);
+  });
+
+  it('deletes all websocket messages on deleteAll', () => {
+    db.insert({ ...baseRecord(), id: 'conn-wipe', kind: 'websocket' });
+    db.insertWebSocketMessages([
+      { id: 'wipe-msg', request_id: 'conn-wipe', timestamp: 1, direction: 'sent',
+        opcode: 'text', payload: Buffer.from('a'), size: 1, truncated: 0 },
+    ]);
+    db.deleteAll();
+    expect(db.getWebSocketMessages('conn-wipe').total).toBe(0);
   });
 });
