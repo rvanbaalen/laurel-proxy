@@ -18,6 +18,7 @@ export interface RequestRecord {
   duration: number | null;
   content_type: string | null;
   truncated: number;
+  kind?: 'http' | 'websocket';
 }
 
 export interface ProxyStatus {
@@ -224,4 +225,244 @@ export function useSSE(maxItems = 500): SSEState {
   }, [maxItems]);
 
   return { requests, statusEvent, clearLocal };
+}
+
+// ── WebSocket messages ──
+
+export type WsOpcode = 'text' | 'binary' | 'ping' | 'pong' | 'close';
+
+export interface UiWsMessage {
+  id: string;
+  request_id: string;
+  timestamp: number;
+  /** 'sent' = client→server, 'received' = server→client */
+  direction: 'sent' | 'received';
+  opcode: WsOpcode;
+  payload: string | null; // base64, or null when no payload was captured
+  size: number;
+  truncated: number;
+}
+
+export interface MessagesResponse {
+  data: UiWsMessage[];
+  total: number;
+  limit: number;
+  offset: number;
+}
+
+export async function getMessages(requestId: string): Promise<MessagesResponse> {
+  const res = await fetch(`${API_BASE}/requests/${requestId}/messages`);
+  if (!res.ok) throw new Error('Failed to load messages');
+  return res.json();
+}
+
+export type WsReplayStopReason = 'idle' | 'close' | 'timeout' | 'error';
+
+export interface WsReplayResponse {
+  /** Frames handed to the socket before the replay ended. */
+  sentCount: number;
+  /** Server frames, in arrival order. `payload` is base64 for both opcodes. */
+  received: { opcode: 'text' | 'binary'; payload: string; offsetMs: number }[];
+  durationMs: number;
+  /** The close code, when the connection closed before the replay ended. */
+  closeCode: number | null;
+  stoppedBecause: WsReplayStopReason;
+  /** Present only when the replay failed or timed out. */
+  error?: string;
+}
+
+/**
+ * Replays a captured WebSocket connection by `requestId` only. Never post
+ * `{ url, frames }` from the browser: `express.json()` on the server has no
+ * `limit` override, so the default 100kb body cap applies, and a single
+ * recorded frame's base64 payload can exceed that on its own — replaying
+ * exactly the captures most worth replaying would fail.
+ */
+export async function replayWebSocketConnection(requestId: string): Promise<WsReplayResponse> {
+  const res = await fetch(`${API_BASE}/websocket/replay`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ requestId }),
+  });
+  if (!res.ok) throw new Error((await res.json()).error ?? 'Replay failed');
+  return res.json();
+}
+
+const WS_CONTROL_ESCAPES: Record<number, string> = {
+  0x00: '\\0', 0x07: '\\a', 0x08: '\\b', 0x09: '\\t',
+  0x0a: '\\n', 0x0b: '\\v', 0x0c: '\\f', 0x0d: '\\r', 0x1b: '\\e',
+};
+
+/**
+ * Neutralizes C0 control characters (including DEL, 0x7f) before a decoded
+ * payload reaches the DOM — mirrors the CLI's `escapeWsControlChars` so a
+ * captured frame (untrusted data) can't smuggle in stray control bytes that
+ * would render oddly outside a normal text flow.
+ */
+export function escapeWsControlChars(text: string): string {
+  let out = '';
+  for (const ch of text) {
+    const code = ch.codePointAt(0) ?? 0;
+    if (code < 0x20 || code === 0x7f) {
+      out += WS_CONTROL_ESCAPES[code] ?? `\\x${code.toString(16).padStart(2, '0')}`;
+    } else {
+      out += ch;
+    }
+  }
+  return out;
+}
+
+function base64ToUtf8(base64: string): string {
+  const binary = atob(base64);
+  const bytes = Uint8Array.from(binary, (c) => c.codePointAt(0) ?? 0);
+  return new TextDecoder('utf-8').decode(bytes);
+}
+
+const WS_PAYLOAD_DISPLAY_LIMIT = 4000;
+
+/**
+ * Renders a WS frame's payload for display.
+ *
+ * - `payload === null` (no payload captured) is reported as `'(no payload)'`
+ *   — distinct from an empty string, which is a real zero-length frame.
+ * - Non-`text` opcodes (binary/ping/pong/close) are never decoded, matching
+ *   the CLI: `<N bytes>`.
+ * - `text` frames are UTF-8 decoded; if the decoded text parses as JSON it is
+ *   pretty-printed (JSON.stringify already escapes any control characters
+ *   inside string values, so `escapeWsControlChars` is NOT re-applied to the
+ *   pretty-printed structural newlines — doing so would turn real indentation
+ *   back into literal "\n" text). Non-JSON text has its control characters
+ *   escaped directly.
+ * - Display is capped at `maxChars` — but capping is always announced with a
+ *   trailing "[+N more characters hidden]" note, never a silent cut.
+ */
+export function formatWsPayload(
+  message: { opcode: WsOpcode; payload: string | null; size: number },
+  maxChars = WS_PAYLOAD_DISPLAY_LIMIT,
+): string {
+  if (message.payload === null) return '(no payload)';
+  if (message.opcode !== 'text') return `<${message.size} bytes>`;
+
+  let text: string;
+  try {
+    text = base64ToUtf8(message.payload);
+  } catch {
+    return `<${message.size} bytes> (undecodable)`;
+  }
+
+  let display: string;
+  try {
+    display = JSON.stringify(JSON.parse(text), null, 2);
+  } catch {
+    display = escapeWsControlChars(text);
+  }
+
+  if (display.length <= maxChars) return display;
+  const hidden = display.length - maxChars;
+  return `${display.slice(0, maxChars)}\n… [+${hidden} more character${hidden === 1 ? '' : 's'} hidden]`;
+}
+
+export interface WsReplayOutcome {
+  level: 'success' | 'warning' | 'error';
+  summary: string;
+}
+
+/**
+ * Maps a replay response's `stoppedBecause` to a user-facing verdict.
+ *
+ * Must never collapse 'idle' or 'timeout' into success: 'idle' means the
+ * replay gave up after a 500ms quiet period, which happens routinely when a
+ * server's first reply is just slower than that (e.g. behind a DB read) —
+ * reporting that as "replay succeeded, zero replies" would misreport the
+ * exact thing the user is trying to observe. 'close' is the only reason
+ * treated as success. closeCode is surfaced whenever present, since on an
+ * abrupt disconnect (1006, no error event) it's the only signal that
+ * distinguishes "closed" from "cut".
+ */
+export function describeReplayOutcome(response: WsReplayResponse): WsReplayOutcome {
+  const closeSuffix = response.closeCode !== null ? ` (close code ${response.closeCode})` : '';
+  const replyCount = response.received.length;
+  const replyNote = `${replyCount} repl${replyCount === 1 ? 'y' : 'ies'} received`;
+
+  switch (response.stoppedBecause) {
+    case 'close':
+      return {
+        level: 'success',
+        summary: `Replay finished: connection closed${closeSuffix}. ${replyNote}.`,
+      };
+    case 'idle':
+      return {
+        level: 'warning',
+        summary: `Replay stopped after the server went quiet for 500ms${closeSuffix} — replies may be incomplete. ${replyNote} so far.`,
+      };
+    case 'timeout':
+      return {
+        level: 'error',
+        summary: `Replay timed out before finishing${closeSuffix}.${response.error ? ` ${response.error}` : ''}`,
+      };
+    case 'error':
+    default:
+      return {
+        level: 'error',
+        summary: `Replay failed${closeSuffix}: ${response.error ?? 'unknown error'}`,
+      };
+  }
+}
+
+export type WsMessagesState = 'loading' | 'loaded' | 'error';
+
+export interface UseWsMessagesResult {
+  messages: UiWsMessage[];
+  total: number;
+  state: WsMessagesState;
+  error: string | null;
+}
+
+/**
+ * Loads a WebSocket connection's captured frames and keeps them live via the
+ * `ws-message` SSE event, filtered to this connection. Intended to be
+ * mounted only while the Messages tab is active — mount/unmount is the
+ * activation signal, so there's no separate "active" flag to keep in sync.
+ *
+ * Distinguishes loading/loaded/error explicitly: a failed fetch surfaces as
+ * `state: 'error'`, never as an empty `messages` array. Collapsing "fetch
+ * failed" into "no messages" would misreport a connection that errored as
+ * one that carried no traffic at all — the same failure class as Task 6's
+ * throttle control reporting unknown state as "off".
+ */
+export function useWsMessages(requestId: string): UseWsMessagesResult {
+  const [data, setData] = useState<{ messages: UiWsMessage[]; total: number }>({ messages: [], total: 0 });
+  const [state, setState] = useState<WsMessagesState>('loading');
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    setState('loading');
+    setError(null);
+    getMessages(requestId).then((result) => {
+      if (cancelled) return;
+      setData({ messages: result.data, total: result.total });
+      setState('loaded');
+    }).catch((err) => {
+      if (cancelled) return;
+      setError(err instanceof Error ? err.message : 'Failed to load messages');
+      setState('error');
+    });
+    return () => { cancelled = true; };
+  }, [requestId]);
+
+  useEffect(() => {
+    const es = new EventSource(`${API_BASE}/events`);
+    es.addEventListener('ws-message', (event) => {
+      const message = JSON.parse((event as MessageEvent).data) as UiWsMessage;
+      if (message.request_id !== requestId) return;
+      setData((prev) => {
+        if (prev.messages.some((m) => m.id === message.id)) return prev;
+        return { messages: [...prev.messages, message], total: prev.total + 1 };
+      });
+    });
+    return () => es.close();
+  }, [requestId]);
+
+  return { messages: data.messages, total: data.total, state, error };
 }

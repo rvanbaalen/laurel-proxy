@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback } from 'react';
-import { fetchRequest } from '../client.ts';
-import type { RequestRecord } from '../client.ts';
+import { fetchRequest, replayWebSocketConnection, formatWsPayload, describeReplayOutcome, useWsMessages } from '../client.ts';
+import type { RequestRecord, UiWsMessage, WsReplayResponse } from '../client.ts';
 
 const SKIP_HEADERS = new Set([
   'proxy-connection', 'proxy-authorization', 'connection',
@@ -55,10 +55,24 @@ interface RequestDetailProps {
 
 export function RequestDetail({ requestId, onClose, onSendToRepeater }: RequestDetailProps) {
   const [record, setRecord] = useState<RequestRecord | null>(null);
-  const [activeTab, setActiveTab] = useState<'request' | 'response'>('response');
+  const [activeTab, setActiveTab] = useState<'request' | 'response' | 'messages'>('response');
   const [copied, setCopied] = useState(false);
 
   useEffect(() => { fetchRequest(requestId).then(setRecord); }, [requestId]);
+
+  // Reset the tab whenever the selection changes, so switching from a
+  // WebSocket connection (Messages tab active) to an ordinary HTTP request
+  // can't leave `activeTab` pointing at a tab that no longer exists.
+  useEffect(() => { setActiveTab('response'); }, [requestId]);
+
+  // Safety net for the same failure mode: if `record` ever settles into a
+  // state where the current tab isn't available (kind isn't 'websocket'),
+  // fall back rather than rendering a blank panel.
+  useEffect(() => {
+    if (activeTab === 'messages' && record?.kind !== 'websocket') {
+      setActiveTab('response');
+    }
+  }, [activeTab, record]);
 
   const copyCurl = useCallback(() => {
     if (!record) return;
@@ -142,16 +156,146 @@ export function RequestDetail({ requestId, onClose, onSendToRepeater }: RequestD
               : 'text-text-muted hover:text-text-secondary border-b-2 border-transparent'
           }`}
         >Response</button>
+        {record.kind === 'websocket' && (
+          <button
+            onClick={() => setActiveTab('messages')}
+            className={`px-4 py-2 text-xs transition-all duration-200 ease-bounce ${
+              activeTab === 'messages'
+                ? 'text-text-primary border-b-2 border-accent'
+                : 'text-text-muted hover:text-text-secondary border-b-2 border-transparent'
+            }`}
+          >Messages</button>
+        )}
       </div>
 
       {/* Content */}
       <div className="flex-1 overflow-auto p-4">
         {activeTab === 'request' ? (
           <><HeadersView headers={requestHeaders} /><BodyView body={record.request_body} contentType={null} /></>
-        ) : (
+        ) : activeTab === 'response' ? (
           <><HeadersView headers={responseHeaders} /><BodyView body={record.response_body} contentType={record.content_type} /></>
+        ) : (
+          <MessagesView requestId={record.id} />
         )}
       </div>
+    </div>
+  );
+}
+
+function MessagesView({ requestId }: { requestId: string }) {
+  const { messages, total, state, error } = useWsMessages(requestId);
+
+  if (state === 'loading') {
+    return <div className="text-text-muted text-xs">Loading messages…</div>;
+  }
+
+  if (state === 'error') {
+    return (
+      <div className="text-red-400 text-xs">
+        Failed to load messages: {error}
+      </div>
+    );
+  }
+
+  return (
+    <div>
+      {messages.length === 0 ? (
+        <div className="text-text-muted text-xs mb-4">No messages captured for this connection.</div>
+      ) : (
+        <>
+          {total > messages.length && (
+            <div className="text-[10px] text-text-muted mb-2">
+              Showing {messages.length} of {total} captured frames.
+            </div>
+          )}
+          <div className="space-y-1.5 mb-4">
+            {messages.map((m) => <MessageRow key={m.id} message={m} />)}
+          </div>
+        </>
+      )}
+      <ReplayControl requestId={requestId} />
+    </div>
+  );
+}
+
+function MessageRow({ message }: { message: UiWsMessage }) {
+  const arrow = message.direction === 'sent' ? '→' : '←';
+  const arrowColor = message.direction === 'sent' ? 'text-accent' : 'text-text-secondary';
+  const time = new Date(message.timestamp).toISOString().slice(11, 23);
+
+  return (
+    <div className="font-mono text-[11px] border border-border-subtle rounded-md p-2 bg-bg-secondary">
+      <div className="flex items-center gap-2 text-text-muted">
+        <span className={`font-semibold ${arrowColor}`}>{arrow}</span>
+        <span>{message.opcode}</span>
+        <span>{message.size}B</span>
+        <span>{time}</span>
+        {message.truncated !== 0 && (
+          <span className="text-yellow-400">truncated at capture</span>
+        )}
+      </div>
+      <pre className="whitespace-pre-wrap text-text-secondary mt-1">{formatWsPayload(message)}</pre>
+    </div>
+  );
+}
+
+function replySize(payload: string): number {
+  try { return atob(payload).length; } catch { return 0; }
+}
+
+function ReplayControl({ requestId }: { requestId: string }) {
+  const [loading, setLoading] = useState(false);
+  const [response, setResponse] = useState<WsReplayResponse | null>(null);
+  const [replayError, setReplayError] = useState<string | null>(null);
+
+  const runReplay = useCallback(() => {
+    setLoading(true);
+    setResponse(null);
+    setReplayError(null);
+    replayWebSocketConnection(requestId)
+      .then(setResponse)
+      .catch((err) => setReplayError(err instanceof Error ? err.message : 'Replay failed'))
+      .finally(() => setLoading(false));
+  }, [requestId]);
+
+  const outcome = response ? describeReplayOutcome(response) : null;
+  const outcomeColor = outcome?.level === 'success'
+    ? 'text-accent'
+    : outcome?.level === 'warning'
+      ? 'text-yellow-400'
+      : 'text-red-400';
+
+  return (
+    <div className="pt-3 border-t border-border-subtle">
+      <button
+        onClick={runReplay}
+        disabled={loading}
+        className="px-3 py-1 text-[11px] rounded-md border border-accent/30 bg-accent/10 text-accent hover:bg-accent/20 transition-colors disabled:opacity-50"
+      >
+        {loading ? 'Replaying…' : 'Replay connection'}
+      </button>
+
+      {replayError && (
+        <p className="mt-2 text-[11px] text-red-400">{replayError}</p>
+      )}
+
+      {outcome && (
+        <div className="mt-2">
+          <p className={`text-[11px] ${outcomeColor}`}>{outcome.summary}</p>
+          {response && response.received.length > 0 && (
+            <div className="space-y-1.5 mt-2">
+              {response.received.map((r, i) => (
+                <pre
+                  key={i}
+                  className="font-mono text-[10px] text-text-secondary bg-bg-secondary border border-border-subtle rounded-md p-2 whitespace-pre-wrap"
+                >
+                  {formatWsPayload({ opcode: r.opcode, payload: r.payload, size: replySize(r.payload) })}
+                </pre>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
     </div>
   );
 }
