@@ -1,15 +1,15 @@
 ---
 name: laurel-proxy
-description: Use when working with Laurel Proxy, intercepting HTTP/HTTPS traffic, debugging API calls, inspecting network requests, or when the user mentions laurel-proxy, proxy traffic, captured requests, or network debugging. Also use when the user asks to start/stop a proxy, view traffic, configure HTTPS interception, or debug why an API call is failing. Trigger even when the user just says "capture traffic", "inspect requests", "what is my app sending", or "debug this API".
-version: 1.2.0
+description: Use when working with Laurel Proxy, intercepting HTTP/HTTPS traffic, debugging API calls, inspecting network requests, or when the user mentions laurel-proxy, proxy traffic, captured requests, or network debugging. Also use when the user asks to start/stop a proxy, view traffic, configure HTTPS interception, simulate slow/throttled network conditions, or inspect/replay WebSocket connections, or debug why an API call is failing. Trigger even when the user just says "capture traffic", "inspect requests", "what is my app sending", "debug this API", "throttle my network", or "inspect websocket messages".
+version: 1.3.0
 ---
 
 # Laurel Proxy
 
 Laurel Proxy is an HTTP/HTTPS intercepting proxy with a CLI and web UI. It captures traffic, stores it in SQLite, and makes it queryable. Works on **macOS** and **Linux**.
 
-Install: `npm install -g @rvanbaalen/laurel-proxy`
-Run without installing: `npx @rvanbaalen/laurel-proxy`
+Install: `npm install -g laurel-proxy`
+Run without installing: `npx laurel-proxy`
 
 ## Quick Start — One Command
 
@@ -64,6 +64,7 @@ Query captured requests. Default output is a human-readable table.
 | `--status <code>` | | Exact HTTP status code |
 | `--method <method>` | | HTTP method (GET, POST, etc.) |
 | `--search <pattern>` | | Substring match on full URL |
+| `--kind <kind>` | | Filter by traffic kind: `http` or `websocket` |
 | `--since <time>` | | After timestamp (Unix ms or ISO date) |
 | `--until <time>` | | Before timestamp (Unix ms or ISO date) |
 | `--limit <n>` | `100` | Max results |
@@ -81,6 +82,7 @@ laurel-proxy requests --host api.example.com --method POST
 laurel-proxy requests --status 500 --limit 20
 laurel-proxy requests --search "/api/v2" --since "2024-01-15T00:00:00Z"
 laurel-proxy requests --format json --host stripe.com | jq '.data[].url'
+laurel-proxy requests --kind websocket --format agent   # find WebSocket connections
 ```
 
 ### `laurel-proxy request <id> [options]`
@@ -143,6 +145,73 @@ laurel-proxy replay a1b2c3d4 --diff --format agent
 ```
 
 **Diff output** shows whether the replay status improved, regressed, changed, or stayed the same compared to the original captured response. Exit codes: 0 = replay is 2xx, 1 = replay is 4xx/5xx, 2 = connection failure.
+
+### `laurel-proxy throttle <preset|off> [options]`
+
+Simulate slower network conditions on traffic passing through the proxy.
+
+| Option | Default | Description |
+|---|---|---|
+| `--down <kbps>` | | Downstream bandwidth |
+| `--up <kbps>` | | Upstream bandwidth |
+| `--latency <ms>` | | Added latency |
+| `--status` | | Show current throttle settings |
+| `--format <format>` | `table` | `json`, `table`, or `agent` |
+| `--ui-port <number>` | `8081` | UI/API port |
+
+Six presets: `56k`, `edge`, `3g`, `4g`, `dsl`, `wifi`. A preset fully replaces the current
+settings; `off` disables throttling. Running `throttle` with no preset and no rate flags
+shows current status, same as `--status`.
+
+```bash
+laurel-proxy throttle 3g                                    # apply a preset
+laurel-proxy throttle off                                   # disable
+laurel-proxy throttle --down 500 --up 100 --latency 200      # explicit values
+laurel-proxy throttle --status --format agent
+```
+
+**⚠️ Throttling inflates recorded `duration`.** The proxy simulates latency/bandwidth
+limits by delaying bytes before forwarding them, and that delay is baked into the
+`duration` stored for every request — indistinguishable from real upstream slowness. If
+you're diagnosing "why is this request slow" and throttling is enabled (`laurel-proxy
+throttle --status`), a high `duration` may mean nothing about the actual server. Always
+check throttle status before drawing conclusions from timing data.
+
+### `laurel-proxy messages <id> [options]`
+
+Show WebSocket frames captured for a connection. `<id>` must be the id of a request with
+`kind: 'websocket'` — use `laurel-proxy requests --kind websocket` first to find it (see
+[WebSocket Capture](#websocket-capture) below).
+
+| Option | Default | Description |
+|---|---|---|
+| `--follow` | off | Stream new frames as they arrive |
+| `--limit <n>` | `500` | Max frames to show |
+| `--format <format>` | `table` | `json`, `table`, or `agent` |
+| `--ui-port <number>` | `8081` | UI/API port (used with `--follow`) |
+| `--db-path <path>` | (config) | Database path |
+
+```bash
+laurel-proxy messages a1b2c3d4                    # frames for a websocket connection
+laurel-proxy messages a1b2c3d4 --follow           # stream new frames live
+laurel-proxy messages a1b2c3d4 --format agent
+```
+
+Pointing `<id>` at a plain HTTP request id fails with a message telling you to use
+`laurel-proxy request <id>` instead. Output is paginated (`--limit` defaults to 500) —
+`table`/`json`/`agent` all report `total`/`limit`/`offset` so you know if there's more.
+
+### `laurel-proxy learn`
+
+Print this skill file to stdout, so an AI agent (or human) can read exactly how to drive
+Laurel Proxy.
+
+| Option | Default | Description |
+|---|---|---|
+| `--format <format>` | `table` | `json`, `table`, or `agent` |
+
+`table`/`agent` print the raw markdown. `--format json` wraps it as `{"content": "..."}`
+for programmatic callers.
 
 ## Agent Output Format (`--format agent`)
 
@@ -229,6 +298,65 @@ laurel-proxy proxy-off
 
 `--tail` handles routing automatically — it enables the system proxy on start and disables it on quit.
 
+## WebSocket Capture
+
+The proxy intercepts WebSocket connections the same way it intercepts HTTP. The `101
+Switching Protocols` handshake is recorded as an ordinary row in `requests` with
+`kind: 'websocket'` — it shows up in `laurel-proxy requests`, filters, and search like
+any other request. Every frame after that is decoded and stored separately, keyed by
+the handshake's request id.
+
+**Discovery matters more than anything else here.** Frames live under the handshake's
+id, not under a URL or hostname, so the workflow is always two commands:
+
+```bash
+laurel-proxy requests --kind websocket --format agent   # 1. find the connection's id
+laurel-proxy messages <id> --format agent                # 2. read its frames
+```
+
+`--format table` tags WebSocket rows with a cyan `WS` in the method column so you can
+spot them in a mixed traffic list.
+
+**Known limitations — don't misread these:**
+
+- **Recording can degrade silently.** If the frame decoder hits a set RSV bit, a
+  malformed frame, or a frame (or reassembled fragmented message) over the 32 MiB cap,
+  that *direction* stops being recorded for the rest of the connection — but the relay
+  keeps forwarding bytes normally, so the application never notices. There is no error,
+  log line, or UI badge. If a captured connection looks like it's missing frames in one
+  direction, this is why.
+- **`Sec-WebSocket-Extensions` is stripped** from the upgrade request before it's
+  forwarded upstream, so `permessage-deflate` can never be negotiated on an intercepted
+  connection — a deliberate trade-off so every captured frame is readable without a
+  decompression path.
+- **Payload encoding differs by surface.** The REST API and SSE `ws-message` event
+  base64-encode every payload unconditionally, regardless of opcode. The CLI's
+  `--format json`/`--format agent` output instead decodes text frames to UTF-8 and
+  base64-encodes only non-text frames, with an explicit `payload_encoding: 'utf8' |
+  'base64'` field saying which. Don't assume one behavior applies to the other surface.
+
+### Replay
+
+`POST /api/websocket/replay` (body: `{"requestId": "<id>"}`) reopens the connection and
+resends the client-sent `text`/`binary` frames, preserving original inter-frame gaps.
+Control frames (ping/pong/close) are not resent. It refuses (`400`) if any client-sent
+data frame was recorded truncated (`truncated: 1`) — replaying a cut-off payload would
+send corrupted data.
+
+**`stoppedBecause` is not a success signal on its own:**
+
+| Value | Meaning |
+|---|---|
+| `'close'` | Server closed the connection. |
+| `'idle'` | 500ms of silence after the last frame either side sent — **routine**, e.g. the server is doing a DB read before replying, not necessarily "done". |
+| `'timeout'` | Overall replay timeout (30s default) elapsed. `error` is also set. |
+| `'error'` | Something failed outright. `error` is also set. |
+
+Check `sentAll` (false = partial replay — not all client-sent frames went out) and
+`sentCount`/`received` before treating any replay as successful. `stoppedBecause: 'idle'`
+with nothing received does **not** mean the replay failed — it may just mean the server
+was still working.
+
 ## REST API
 
 Available at `http://127.0.0.1:8081/api` when the proxy is running.
@@ -242,12 +370,20 @@ Available at `http://127.0.0.1:8081/api` when the proxy is running.
 | `/api/proxy/start` | POST | Start the proxy |
 | `/api/proxy/stop` | POST | Stop the proxy |
 | `/api/shutdown` | POST | Shut down the entire process |
-| `/api/events` | GET | SSE stream for real-time traffic |
+| `/api/events` | GET | SSE stream for real-time traffic (`request` events; `ws-message` for WebSocket frames) |
 | `/api/replay` | POST | Replay a captured request (body: `{ url, method, headers, body }`) |
+| `/api/throttle` | GET | Current throttle settings + presets |
+| `/api/throttle` | PUT | Set throttle (body: `{ preset }` or `{ enabled, downKbps, upKbps, latencyMs }`) |
+| `/api/requests/:id/messages` | GET | Paginated WebSocket frames for a connection (`?limit&offset`) |
+| `/api/websocket/replay` | POST | Replay a captured WebSocket connection (body: `{ requestId }`) |
 
 ## Using Laurel Proxy as Claude (agent workflow)
 
 When you (Claude) need to debug HTTP traffic — for example, the user says "why is this API call failing" or "what's my app sending to Stripe" — use `--format agent` for enriched, LLM-optimized output. This is much faster than asking the user to describe what they see.
+
+**Before drawing any conclusion from `duration`, run `laurel-proxy throttle --status`.**
+If throttling is enabled, recorded durations include simulated delay and will look like
+upstream slowness even when the server responded instantly — see [`throttle`](#laurel-proxy-throttle-presetoff-options).
 
 ### Step 1: Find failing requests
 
@@ -347,6 +483,9 @@ laurel-proxy requests --host api.thirdparty.com --tail
 ### Find slow requests
 
 ```bash
+# Check throttling isn't skewing durations before trusting any timing data
+laurel-proxy throttle --status
+
 # Find requests slower than 500ms
 laurel-proxy requests --host api.example.com --slow 500 --format agent
 
@@ -354,6 +493,24 @@ laurel-proxy requests --host api.example.com --slow 500 --format agent
 laurel-proxy requests --host api.example.com --format table --limit 50
 # The TIME column shows duration in ms — spot outliers
 ```
+
+If throttling is enabled, `duration` includes the simulated delay — a "slow" request may
+just be throttled, not actually slow upstream. Run `laurel-proxy throttle off` to rule
+this out.
+
+### Debug a WebSocket connection
+
+```bash
+# 1. Find the connection (handshakes show up with kind: websocket)
+laurel-proxy requests --kind websocket --format agent
+# 2. Read its frames
+laurel-proxy messages <id-from-step-1> --format agent
+# 3. Watch it live
+laurel-proxy messages <id-from-step-1> --follow
+```
+
+If a direction seems to be missing frames, see [WebSocket Capture](#websocket-capture) —
+recording can degrade silently for a malformed/oversized frame with no visible error.
 
 ### Feed captured traffic to an LLM for analysis
 
