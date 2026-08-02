@@ -3,6 +3,8 @@ import http from 'node:http';
 import type net from 'node:net';
 import { resolveHttpTarget, resolveMitmTarget, handleExchange } from './exchange.js';
 import { DEFAULT_CONFIG } from '../shared/types.js';
+import type { Config, RequestRecord } from '../shared/types.js';
+import { watchProcessErrors } from '../../tests/helpers/process-errors.js';
 
 describe('resolveHttpTarget', () => {
   it('parses an absolute-form proxy URL', () => {
@@ -45,6 +47,131 @@ describe('resolveMitmTarget', () => {
     expect(resolveMitmTarget('api.example.com', 443, '/v1').url).toBe(
       'https://api.example.com/v1',
     );
+  });
+});
+
+interface ProxiedResponse {
+  status: number;
+  body: string;
+  /** False when the response was cut off instead of ending cleanly. */
+  complete: boolean;
+  escaped: string[];
+}
+
+/**
+ * Drives one GET through `handleExchange` with the deps under test.
+ *
+ * The dispatch mirrors `ProxyServer` exactly — `void handleExchange(...)` — as
+ * that is what makes an escaping recording failure fatal rather than merely
+ * logged: the returned promise has no caller, and Node 22 defaults to
+ * `--unhandled-rejections=throw`.
+ */
+async function runExchange(
+  deps: { config: Config; onRecord: (record: RequestRecord) => void },
+  respond: (res: http.ServerResponse) => void,
+): Promise<ProxiedResponse> {
+  const upstream = http.createServer((_req, res) => respond(res));
+  await new Promise<void>((r) => upstream.listen(0, '127.0.0.1', () => r()));
+  const upstreamPort = (upstream.address() as net.AddressInfo).port;
+
+  const proxy = http.createServer((clientReq, clientRes) => {
+    const target = resolveHttpTarget(`http://127.0.0.1:${upstreamPort}${clientReq.url}`);
+    if (!target) {
+      clientRes.writeHead(400);
+      clientRes.end();
+      return;
+    }
+    void handleExchange(clientReq, clientRes, target, deps);
+  });
+  await new Promise<void>((r) => proxy.listen(0, '127.0.0.1', () => r()));
+  const proxyPort = (proxy.address() as net.AddressInfo).port;
+
+  let status = 0;
+  let body = '';
+  let complete = false;
+  try {
+    const escaped = await watchProcessErrors(
+      () =>
+        new Promise<void>((resolve) => {
+          const req = http.request(
+            { host: '127.0.0.1', port: proxyPort, path: '/body', method: 'GET' },
+            (res) => {
+              status = res.statusCode ?? 0;
+              res.on('data', (chunk: Buffer) => { body += chunk; });
+              res.on('end', () => { complete = true; resolve(); });
+              res.on('aborted', () => resolve());
+              res.on('error', () => resolve());
+            },
+          );
+          req.on('error', () => resolve());
+          req.end();
+        }),
+    );
+    return { status, body, complete, escaped };
+  } finally {
+    proxy.close();
+    upstream.close();
+  }
+}
+
+describe('handleExchange recording failures', () => {
+  it('serves the whole response when onRecord throws', async () => {
+    const onRecord = vi.fn(() => {
+      throw new Error('write queue is down');
+    });
+
+    const { status, body, complete, escaped } = await runExchange(
+      { config: DEFAULT_CONFIG, onRecord },
+      (res) => {
+        res.writeHead(200, { 'Content-Type': 'text/plain' });
+        res.end('payload');
+      },
+    );
+
+    expect(status).toBe(200);
+    expect(body).toBe('payload');
+    expect(complete).toBe(true);
+    expect(onRecord).toHaveBeenCalledTimes(1);
+    // The exchange is the product; the recording is a by-product. A failing
+    // by-product may not take the process with it.
+    expect(escaped).toEqual([]);
+  });
+
+  it('serves the whole response when the record cannot be built at all', async () => {
+    // `maxBodySize` is read in three places that exist only for the recording:
+    // the capture bookkeeping inside the streaming loop, the truncation flag and
+    // the request-body clip. A getter that throws stands in for a failure in any
+    // of them. None of those expressions can throw today — which is precisely
+    // why the boundary has to be structural rather than a bet on the current
+    // arithmetic, and why this test exists to keep it that way.
+    const config: Config = { ...DEFAULT_CONFIG };
+    Object.defineProperty(config, 'maxBodySize', {
+      get(): number {
+        throw new Error('recording bookkeeping failed');
+      },
+    });
+    const onRecord = vi.fn();
+
+    const { status, body, complete, escaped } = await runExchange(
+      { config, onRecord },
+      (res) => {
+        // Several chunks, so the capture bookkeeping inside the streaming loop
+        // is reached more than once and the relay has to survive each time.
+        res.writeHead(200, { 'Content-Type': 'text/plain' });
+        res.write('first-');
+        setTimeout(() => {
+          res.write('second-');
+          setTimeout(() => res.end('third'), 10);
+        }, 10);
+      },
+    );
+
+    expect(status).toBe(200);
+    expect(body).toBe('first-second-third');
+    expect(complete).toBe(true);
+    expect(escaped).toEqual([]);
+    // Losing the row is the acceptable half of the trade.
+    expect(onRecord).not.toHaveBeenCalled();
   });
 });
 

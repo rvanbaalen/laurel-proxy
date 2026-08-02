@@ -5,6 +5,7 @@ import { randomUUID } from 'node:crypto';
 import { WsFrameDecoder } from './ws-frames.js';
 import type { WsMessage } from './ws-frames.js';
 import { waitForDrain } from './stream-utils.js';
+import { recordSafely } from './recording-safety.js';
 import type { ExchangeTarget } from './exchange.js';
 import type { Throttler, RateLimiter } from './throttle.js';
 import type { Config, RequestRecord, WebSocketMessage } from '../shared/types.js';
@@ -37,12 +38,20 @@ export function handleWebSocketUpgrade(
   target: ExchangeTarget,
   deps: WebSocketDeps,
 ): void {
+  // The one piece of recording state that has to exist before the guard: the
+  // connection row and every frame recorded against it key off the same id, so
+  // it cannot be minted inside either of them. `randomUUID` fails only when the
+  // platform CSPRNG is unavailable, which would already have stopped this proxy
+  // from generating a certificate.
   const id = randomUUID();
   const startTime = Date.now();
   const { config } = deps;
 
   // Fields both outcomes — an accepted upgrade or a refusal — record the same.
-  const requestFields = {
+  // A function rather than an object so the building happens inside whichever
+  // guard is about to use it: this runs from an EventEmitter handler, where a
+  // throw is an uncaught exception, and it exists only for the recording.
+  const requestFields = () => ({
     id,
     timestamp: startTime,
     method: clientReq.method || 'GET',
@@ -54,7 +63,7 @@ export function handleWebSocketUpgrade(
     request_headers: JSON.stringify(clientReq.headers),
     request_body: null,
     request_size: 0,
-  };
+  });
 
   const upstreamHeaders: http.OutgoingHttpHeaders = { ...clientReq.headers };
   delete upstreamHeaders['proxy-connection'];
@@ -93,17 +102,24 @@ export function handleWebSocketUpgrade(
     // Queued before any frame can be observed below. The proxy flushes the
     // request queue ahead of the frame queue on the same timer, so a reader can
     // never see a frame whose parent connection row is still missing.
-    recordSafely(deps.onRecord, {
-      ...requestFields,
-      kind: 'websocket',
-      status: upstreamRes.statusCode ?? 101,
-      response_headers: JSON.stringify(upstreamRes.headers),
-      response_body: null,
-      response_size: 0,
-      duration: Date.now() - startTime,
-      content_type: 'websocket',
-      truncated: 0,
-    });
+    //
+    // Built inside the guard, not passed into it: this runs from an EventEmitter
+    // handler, so an argument expression that threw — `JSON.stringify` on
+    // headers, say — would be an uncaught exception, killing the process over a
+    // row it failed to write.
+    recordSafely(() =>
+      deps.onRecord({
+        ...requestFields(),
+        kind: 'websocket',
+        status: upstreamRes.statusCode ?? 101,
+        response_headers: JSON.stringify(upstreamRes.headers),
+        response_body: null,
+        response_size: 0,
+        duration: Date.now() - startTime,
+        content_type: 'websocket',
+        truncated: 0,
+      }),
+    );
 
     const observe = makeObserver(id, config, deps.onMessages);
 
@@ -148,12 +164,18 @@ export function handleWebSocketUpgrade(
     let responseSize = 0;
     try {
       for await (const chunk of upstreamRes as AsyncIterable<Buffer>) {
-        responseSize += chunk.length;
-        if (capturedLength < config.maxBodySize) {
-          const slice = chunk.subarray(0, config.maxBodySize - capturedLength);
-          captured.push(slice);
-          capturedLength += slice.length;
-        }
+        // Guarded because this `try`'s catch destroys the client socket: a
+        // failure in the capture bookkeeping must not abort a transfer that is
+        // otherwise proceeding perfectly. Same inversion as the frame path, one
+        // layer down.
+        recordSafely(() => {
+          responseSize += chunk.length;
+          if (capturedLength < config.maxBodySize) {
+            const slice = chunk.subarray(0, config.maxBodySize - capturedLength);
+            captured.push(slice);
+            capturedLength += slice.length;
+          }
+        });
         await deps.throttle?.down.consume(chunk.length);
         if (!clientSocket.write(chunk)) await waitForDrain(clientSocket);
       }
@@ -166,17 +188,23 @@ export function handleWebSocketUpgrade(
     }
     clientSocket.end();
 
-    const body = Buffer.concat(captured);
-    recordSafely(deps.onRecord, {
-      ...requestFields,
-      kind: 'http',
-      status: upstreamRes.statusCode ?? 0,
-      response_headers: JSON.stringify(upstreamRes.headers),
-      response_body: body.length > 0 ? body : null,
-      response_size: responseSize,
-      duration: Date.now() - startTime,
-      content_type: (upstreamRes.headers['content-type'] || '').split(';')[0].trim() || null,
-      truncated: responseSize > config.maxBodySize ? 1 : 0,
+    // Built inside the guard for the same reason as the accepted-upgrade row,
+    // and with the same consequence if it were not: `relayRefusal` is started
+    // with `void`, so a rejection from here reaches nobody and Node 22 turns it
+    // into a process exit.
+    recordSafely(() => {
+      const body = Buffer.concat(captured);
+      deps.onRecord({
+        ...requestFields(),
+        kind: 'http',
+        status: upstreamRes.statusCode ?? 0,
+        response_headers: JSON.stringify(upstreamRes.headers),
+        response_body: body.length > 0 ? body : null,
+        response_size: responseSize,
+        duration: Date.now() - startTime,
+        content_type: (upstreamRes.headers['content-type'] || '').split(';')[0].trim() || null,
+        truncated: responseSize > config.maxBodySize ? 1 : 0,
+      });
     });
   };
 
@@ -236,8 +264,7 @@ function relay(
 }
 
 /**
- * The recording boundary for frames. The observer is called for its side effects
- * and any failure it raises stops here.
+ * The recording boundary for frames.
  *
  * A thrown exception is control flow: left unguarded it would abort the pump's
  * read loop and half-close the peer, which means a bug anywhere in the recording
@@ -247,25 +274,7 @@ function relay(
  * every future edit of the observer to preserve.
  */
 function observeSafely(observe: Observer, direction: Direction, chunk: Buffer): void {
-  try {
-    observe(direction, chunk);
-  } catch {
-    // Recording failed for this chunk. The relay carries on regardless.
-  }
-}
-
-/**
- * The same boundary for the connection row. `onRecord` reaches the write queue
- * and every event subscriber, and on the accepted-upgrade path it runs inside an
- * EventEmitter handler — where an unguarded throw would take down the process,
- * not just the connection.
- */
-function recordSafely(onRecord: (record: RequestRecord) => void, record: RequestRecord): void {
-  try {
-    onRecord(record);
-  } catch {
-    // The exchange happened whether or not we managed to record it.
-  }
+  recordSafely(() => observe(direction, chunk));
 }
 
 /**
@@ -314,14 +323,22 @@ function makeObserver(
   config: Config,
   onMessages: (messages: WebSocketMessage[]) => void,
 ): Observer {
-  const decoders: Record<Direction, WsFrameDecoder> = {
-    sent: new WsFrameDecoder(),
-    received: new WsFrameDecoder(),
-  };
+  // Built on first use rather than here, so construction happens inside the
+  // observer — which every call site invokes through the recording guard —
+  // rather than in the EventEmitter handler that calls `makeObserver`, where a
+  // throw would be an uncaught exception. A `null` entry is written first, so a
+  // constructor that threw latches the direction off instead of being retried on
+  // the next chunk: a decoder started mid-stream would resynchronise on the
+  // wrong frame boundary, and a wrong boundary is worse than a missing frame.
+  const decoders = new Map<Direction, WsFrameDecoder | null>();
 
   return (direction, chunk) => {
-    const decoder = decoders[direction];
-    if (decoder.isFailed) return;
+    if (!decoders.has(direction)) {
+      decoders.set(direction, null);
+      decoders.set(direction, new WsFrameDecoder());
+    }
+    const decoder = decoders.get(direction);
+    if (!decoder || decoder.isFailed) return;
 
     let frames: WsMessage[];
     try {

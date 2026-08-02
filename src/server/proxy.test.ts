@@ -8,11 +8,14 @@ import { Database } from '../storage/db.js';
 import { CertificateAuthority } from './ssl.js';
 import { EventManager } from './events.js';
 import { DEFAULT_CONFIG } from '../shared/types.js';
-import type { Config } from '../shared/types.js';
+import type { Config, RequestRecord, WebSocketMessage } from '../shared/types.js';
+import { startRawWsServer, echoHandler } from '../../tests/helpers/ws-server.js';
+import { encodeFrame } from '../../tests/helpers/ws-frames.js';
+import { watchProcessErrors } from '../../tests/helpers/process-errors.js';
 import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
-import { randomUUID } from 'node:crypto';
+import crypto, { randomUUID } from 'node:crypto';
 
 function createTargetServer(): Promise<http.Server> {
   return new Promise((resolve) => {
@@ -379,6 +382,160 @@ describe('ProxyServer - HTTPS', () => {
     });
 
     expect(connectResult.statusCode).toBe(200);
+  });
+});
+
+/**
+ * A Database that accepts nothing.
+ *
+ * `ProxyServer` only ever reaches `insertBatch` and `insertWebSocketMessages`,
+ * so a two-method stand-in covers it. A stub rather than a real database is what
+ * makes the failure deterministic: the real one throws from exactly here on a
+ * full disk (`SQLITE_FULL`), a locked file, a corrupted database or a failed
+ * migration, and none of those can be arranged reliably inside a test.
+ */
+function createFullDiskDb(): {
+  db: Database;
+  requestBatches: RequestRecord[][];
+  messageBatches: WebSocketMessage[][];
+} {
+  const requestBatches: RequestRecord[][] = [];
+  const messageBatches: WebSocketMessage[][] = [];
+  const db = {
+    insertBatch(records: RequestRecord[]): void {
+      requestBatches.push(records);
+      throw new Error('SQLITE_FULL: database or disk is full');
+    },
+    insertWebSocketMessages(messages: WebSocketMessage[]): void {
+      messageBatches.push(messages);
+      throw new Error('SQLITE_FULL: database or disk is full');
+    },
+  };
+  return { db: db as unknown as Database, requestBatches, messageBatches };
+}
+
+const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
+
+/**
+ * The flush timer is the one recording path a user reaches without doing
+ * anything unusual — a full disk is enough — and it runs from `setInterval`,
+ * where an escaping throw is an uncaught exception and therefore the end of the
+ * developer's proxy. Losing rows is the acceptable failure; dying is not.
+ */
+describe('ProxyServer - recording failures', () => {
+  let targetServer: http.Server;
+  let targetPort: number;
+  let proxy: ProxyServer;
+  let events: EventManager;
+  let caDir: string;
+  let proxyPort: number;
+  let failing: ReturnType<typeof createFullDiskDb>;
+
+  beforeEach(async () => {
+    targetServer = await createTargetServer();
+    targetPort = (targetServer.address() as net.AddressInfo).port;
+    caDir = path.join(os.tmpdir(), `laurel-proxy-ca-test-${randomUUID()}`);
+    events = new EventManager();
+    const ca = new CertificateAuthority(caDir, 10);
+    ca.init();
+    failing = createFullDiskDb();
+    const config: Config = {
+      ...DEFAULT_CONFIG,
+      proxyPort: 0,
+      dbPath: path.join(os.tmpdir(), `laurel-proxy-unused-${randomUUID()}.db`),
+      maxBodySize: 1024 * 1024,
+    };
+    proxy = new ProxyServer(failing.db, ca, events, config);
+    proxyPort = await proxy.start();
+  });
+
+  afterEach(async () => {
+    await proxy.stop();
+    events.stop();
+    targetServer.close();
+    fs.rmSync(caDir, { recursive: true, force: true });
+  });
+
+  it('keeps proxying when the request insert throws, and drops the batch', async () => {
+    const first = `http://127.0.0.1:${targetPort}/json`;
+    const second = `http://127.0.0.1:${targetPort}/`;
+    let firstRes: Awaited<ReturnType<typeof httpGet>> | undefined;
+    let secondRes: Awaited<ReturnType<typeof httpGet>> | undefined;
+
+    const escaped = await watchProcessErrors(async () => {
+      firstRes = await httpGet(first, proxyPort);
+      // Two turns of the 100ms flush timer, so the failing insert has certainly
+      // run — and the timer has certainly fired again — before the next request.
+      await sleep(250);
+      secondRes = await httpGet(second, proxyPort);
+      await sleep(250);
+    });
+
+    // The proxy is still alive and still answering, and the bytes are intact.
+    expect(escaped).toEqual([]);
+    expect(firstRes?.status).toBe(200);
+    expect(JSON.parse(firstRes!.body)).toEqual({ message: 'hello' });
+    expect(secondRes?.status).toBe(200);
+    expect(secondRes?.body).toBe('ok');
+
+    // Exactly one insert attempt per request, in order. Anything appearing
+    // twice would mean the failed batch went back on the queue, which would
+    // grow it without bound and turn a full disk into a permanent failure.
+    expect(failing.requestBatches.flat().map((r) => r.url)).toEqual([first, second]);
+  });
+
+  it('keeps relaying frames when the message insert throws, and drops the batch', async () => {
+    const upstream = await startRawWsServer({ onMessage: echoHandler });
+    const echoFrame = encodeFrame('text', Buffer.from('re:hello'));
+    let relayed = Buffer.alloc(0);
+
+    try {
+      const escaped = await watchProcessErrors(async () => {
+        await new Promise<void>((resolve, reject) => {
+          const req = http.request({
+            host: '127.0.0.1',
+            port: proxyPort,
+            path: `http://127.0.0.1:${upstream.port}/ws`,
+            headers: {
+              host: `127.0.0.1:${upstream.port}`,
+              Connection: 'Upgrade',
+              Upgrade: 'websocket',
+              'Sec-WebSocket-Key': crypto.randomBytes(16).toString('base64'),
+              'Sec-WebSocket-Version': '13',
+            },
+          });
+          req.on('upgrade', (_res, socket, head) => {
+            relayed = Buffer.concat([relayed, head]);
+            socket.on('data', (chunk: Buffer) => {
+              relayed = Buffer.concat([relayed, chunk]);
+              if (relayed.length >= echoFrame.length) {
+                socket.end();
+                resolve();
+              }
+            });
+            socket.on('error', reject);
+            socket.write(encodeFrame('text', Buffer.from('hello'), true));
+          });
+          req.on('error', reject);
+          req.end();
+        });
+        await sleep(300);
+      });
+
+      expect(escaped).toEqual([]);
+      // Byte-identical: the relay owes the application every byte even when
+      // every write to the database is failing.
+      expect(relayed.equals(echoFrame)).toBe(true);
+
+      const offered = failing.messageBatches.flat();
+      expect(
+        offered.map((m) => `${m.direction}:${Buffer.from(m.payload!).toString()}`),
+      ).toEqual(['sent:hello', 'received:re:hello']);
+      // Same drop-don't-retry rule as the request queue.
+      expect(new Set(offered.map((m) => m.id)).size).toBe(offered.length);
+    } finally {
+      upstream.close();
+    }
   });
 });
 

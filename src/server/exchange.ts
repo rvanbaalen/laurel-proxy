@@ -3,6 +3,7 @@ import https from 'node:https';
 import { randomUUID } from 'node:crypto';
 import { URL } from 'node:url';
 import { waitForDrain } from './stream-utils.js';
+import { recordSafely } from './recording-safety.js';
 import type { Config, RequestRecord } from '../shared/types.js';
 import type { Throttler } from './throttle.js';
 
@@ -70,7 +71,6 @@ export async function handleExchange(
   deps: ExchangeDeps,
 ): Promise<void> {
   const startTime = Date.now();
-  const id = randomUUID();
   const { config } = deps;
 
   let requestBody: Buffer;
@@ -140,12 +140,17 @@ export async function handleExchange(
   let streamFailed = false;
   try {
     for await (const chunk of proxyRes as AsyncIterable<Buffer>) {
-      responseSize += chunk.length;
-      if (capturedLength < config.maxBodySize) {
-        const slice = chunk.subarray(0, config.maxBodySize - capturedLength);
-        captured.push(slice);
-        capturedLength += slice.length;
-      }
+      // Guarded because this `try`'s catch destroys the client response: without
+      // it, a failure in the capture bookkeeping would abort a transfer that is
+      // otherwise proceeding perfectly.
+      recordSafely(() => {
+        responseSize += chunk.length;
+        if (capturedLength < config.maxBodySize) {
+          const slice = chunk.subarray(0, config.maxBodySize - capturedLength);
+          captured.push(slice);
+          capturedLength += slice.length;
+        }
+      });
       await deps.throttle?.down.consume(chunk.length);
       if (!clientRes.write(chunk)) await waitForDrain(clientRes);
     }
@@ -160,30 +165,37 @@ export async function handleExchange(
   // misleading for the network failures this proxy exists to diagnose.
   if (streamFailed) return;
 
-  const responseBody = Buffer.concat(captured);
-  const truncated =
-    requestBody.length > config.maxBodySize || responseSize > config.maxBodySize;
-  const contentType =
-    (proxyRes.headers['content-type'] || '').split(';')[0].trim() || null;
+  // Everything the record is made of is built inside the guard, not passed into
+  // it. `handleExchange` is dispatched as `void handleExchange(...)`, so its
+  // rejection has no caller and Node 22 turns it into a process exit; and an
+  // argument expression would be evaluated before the guard was entered, which
+  // is how a total boundary quietly decays into one that merely happens to hold.
+  recordSafely(() => {
+    const responseBody = Buffer.concat(captured);
+    const truncated =
+      requestBody.length > config.maxBodySize || responseSize > config.maxBodySize;
+    const contentType =
+      (proxyRes.headers['content-type'] || '').split(';')[0].trim() || null;
 
-  deps.onRecord({
-    id,
-    timestamp: startTime,
-    method: clientReq.method || 'GET',
-    url: target.url,
-    host: target.hostname,
-    path: target.path,
-    protocol: target.protocol,
-    request_headers: JSON.stringify(clientReq.headers),
-    request_body:
-      requestBody.length > 0 ? requestBody.subarray(0, config.maxBodySize) : null,
-    request_size: requestBody.length,
-    status: proxyRes.statusCode ?? 0,
-    response_headers: JSON.stringify(proxyRes.headers),
-    response_body: responseBody.length > 0 ? responseBody : null,
-    response_size: responseSize,
-    duration: Date.now() - startTime,
-    content_type: contentType,
-    truncated: truncated ? 1 : 0,
+    deps.onRecord({
+      id: randomUUID(),
+      timestamp: startTime,
+      method: clientReq.method || 'GET',
+      url: target.url,
+      host: target.hostname,
+      path: target.path,
+      protocol: target.protocol,
+      request_headers: JSON.stringify(clientReq.headers),
+      request_body:
+        requestBody.length > 0 ? requestBody.subarray(0, config.maxBodySize) : null,
+      request_size: requestBody.length,
+      status: proxyRes.statusCode ?? 0,
+      response_headers: JSON.stringify(proxyRes.headers),
+      response_body: responseBody.length > 0 ? responseBody : null,
+      response_size: responseSize,
+      duration: Date.now() - startTime,
+      content_type: contentType,
+      truncated: truncated ? 1 : 0,
+    });
   });
 }
