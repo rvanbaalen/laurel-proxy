@@ -387,17 +387,34 @@ describe('formatWsMessages', () => {
 
   it('escapes control characters in the table preview instead of printing them raw', () => {
     // An embedded ESC (0x1b) could otherwise inject an ANSI escape sequence
-    // into the terminal, and an embedded newline would break the
-    // one-line-per-message layout this formatter promises.
-    const payload = Buffer.from('before\x1b[31mred\nafter');
+    // into the terminal, and an embedded newline/CR/tab would break the
+    // one-line-per-message layout this formatter promises. A character-class
+    // exclusion over the whole output can't tell "escaped" from "absent", so
+    // this asserts directly on the escaped literal text and on the layout
+    // property itself.
+    const payload = Buffer.from('before\x1b[31mred\ntab\tend\rafter');
     const out = formatWsMessages(
       { data: [wsMessage({ payload, size: payload.length })], total: 1, limit: 500, offset: 0 },
       'table',
     );
-    // eslint-disable-next-line no-control-regex
-    expect(/[\x00-\x08\x0b\x0c\x0e-\x1f]/.test(out.replace(/\x1b\[[0-9;]*m/g, ''))).toBe(false);
-    expect(out).toContain('before');
-    expect(out).toContain('after');
+
+    // The message must still occupy exactly one printed line: split on real
+    // newlines and find the row containing 'before'. If \n (or \r) weren't
+    // escaped, 'after' would land on a different split-line than 'before',
+    // and this line-scoped lookup would come up empty for it.
+    const rowLine = out.split('\n').find((line) => line.includes('before'));
+    expect(rowLine).toBeDefined();
+    expect(rowLine).toContain('after');
+
+    // The escape sequences themselves must be visible as literal text, not
+    // silently dropped or passed through raw.
+    expect(rowLine).toContain('\\e'); // ESC
+    expect(rowLine).toContain('\\n'); // embedded newline
+    expect(rowLine).toContain('\\t'); // embedded tab
+    expect(rowLine).toContain('\\r'); // embedded carriage return
+    // No raw ANSI injection from payload content (distinct from picocolors'
+    // own green/blue/dim codes used elsewhere on the same line).
+    expect(rowLine).not.toContain('\x1b[31m');
   });
 
   it('includes a human-readable summary in agent format', () => {
@@ -408,6 +425,26 @@ describe('formatWsMessages', () => {
     const parsed = JSON.parse(out);
     expect(parsed.summary).toContain('2 message');
     expect(parsed.data[0].payload_encoding).toBe('utf8');
+  });
+
+  it('carries the full payload uncut in json/agent format, unlike the truncated table preview', () => {
+    // Same no-silent-truncation property already guarded for
+    // formatWsMessageLine (the streaming path), pinned here for the
+    // collection path too so encodeWsMessageForOutput and
+    // encodeWsMessageLineForOutput can't drift apart on this.
+    const longText = 'x'.repeat(1000);
+    const message = wsMessage({ payload: Buffer.from(longText), size: 1000 });
+
+    const jsonOut = formatWsMessages({ data: [message], total: 1, limit: 500, offset: 0 }, 'json');
+    const parsedJson = JSON.parse(jsonOut).data[0].payload;
+    expect(parsedJson).toBe(longText);
+    expect(parsedJson.length).toBe(1000);
+
+    const agentOut = formatWsMessages({ data: [message], total: 1, limit: 500, offset: 0 }, 'agent');
+    expect(JSON.parse(agentOut).data[0].payload).toBe(longText);
+
+    const tableOut = formatWsMessages({ data: [message], total: 1, limit: 500, offset: 0 }, 'table');
+    expect(tableOut).not.toContain(longText);
   });
 });
 
