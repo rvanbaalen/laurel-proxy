@@ -11,9 +11,13 @@
   ],
   "scripts": {
     "build:server": "tsc -p tsconfig.server.json",
-    "build:ui": "vite build",
+    "build:ui": "tsc -p tsconfig.ui.json && vite build",
     "build": "npm run build:server && npm run build:ui",
     "dev:ui": "vite",
+    "typecheck:src": "tsc -p tsconfig.json --noEmit",
+    "typecheck:dist": "tsc -p tsconfig.server.json --noEmit",
+    "typecheck:ui": "tsc -p tsconfig.ui.json",
+    "typecheck": "npm run typecheck:src && npm run typecheck:dist && npm run typecheck:ui",
     "test": "vitest run",
     "test:watch": "vitest",
     "prepublishOnly": "npm run build"

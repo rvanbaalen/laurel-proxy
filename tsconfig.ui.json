@@ -1,0 +1,18 @@
+{
+  // The web UI is compiled by Vite (esbuild), which strips types without
+  // checking them. Without this project nothing type-checks `src/ui/**` at all:
+  // the base project excludes it, and `vite build` never reports a type error.
+  // Type-check only — `vite build` remains the thing that emits.
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "noEmit": true,
+    // Vite resolves the UI's `.ts`/`.tsx` import specifiers as written, so the
+    // checker has to accept the same specifiers the bundler does.
+    "module": "ESNext",
+    "moduleResolution": "Bundler",
+    "allowImportingTsExtensions": true,
+    "lib": ["ES2022", "DOM", "DOM.Iterable"]
+  },
+  "include": ["src/ui/**/*.ts", "src/ui/**/*.tsx"],
+  "exclude": ["node_modules", "dist"]
+}
