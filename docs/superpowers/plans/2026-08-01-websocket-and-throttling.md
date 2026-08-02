@@ -3723,6 +3723,25 @@ process does not die.
 - [ ] **Step 4:** Falsify each guard: remove it, confirm RED, restore, confirm GREEN.
 - [ ] **Step 5:** Run the full suite plus both typecheck projects. Commit.
 
+### Item 6: the web UI is never type-checked
+
+Discovered during Task 13 and confirmed independently: `tsconfig.json` has
+`"exclude": ["src/ui/**", ...]`, and `build:ui` is `vite build`, which uses esbuild and
+does **not** type-check. Verified with
+`npx tsc -p tsconfig.json --listFilesOnly | grep -c "src/ui"` → `0`.
+
+So no build or test step type-checks the entire React app. Tasks 6 and 13 both added UI
+code, and both implementers noticed the gap and ran ad-hoc strict checks by hand to
+compensate — which is not a guarantee that survives them.
+
+This belongs here because it makes an existing correctness guarantee real rather than
+adding a feature, and because it retroactively validates the UI code just shipped.
+
+Add a `tsconfig.ui.json` covering `src/ui/**` with `noEmit` (JSX is already configured
+in the base config; `vite build` remains the thing that emits), plus a `typecheck`
+script that runs every project. Then **fix whatever it reports** — if it surfaces real
+errors in existing UI code, that is the gap doing its job. Report what it found.
+
 ### Explicitly out of scope
 
 Surfacing degraded recordings to the user. There is still no schema field meaning "this
