@@ -80,7 +80,14 @@ describe('replayWebSocket', () => {
       expect(result.sentCount).toBe(2);
       expect(texts(result.received)).toEqual(['re:alpha', 're:beta']);
       expect(result.received.every((r) => r.opcode === 'text')).toBe(true);
-      expect(result.durationMs).toBeGreaterThanOrEqual(0);
+      expect(result.stoppedBecause).toBe('idle');
+      // The echo server never closes, so the replay can only have ended on the
+      // 500ms quiet period that follows the last reply — and well inside the
+      // timeout. Both bounds are reachable: a hardcoded duration fails the
+      // lower one, a replay that waited out the timeout fails the upper.
+      expect(result.durationMs).toBeGreaterThanOrEqual(500);
+      expect(result.durationMs).toBeLessThan(5000);
+      expect(result.closeCode).toBeNull();
     } finally {
       server.close();
     }
@@ -136,14 +143,15 @@ describe('replayWebSocket', () => {
     // Regression: the idle countdown used to be armed by any inbound message,
     // including one that arrived while frames were still queued. A recorded gap
     // longer than the quiet period then finished the replay early — silently,
-    // with a short sentCount and no error.
+    // with a short sentCount and no error. The gap is three times the quiet
+    // period so the guard's absence cannot be mistaken for scheduling slack.
     const server = await startRawWsServer({ onMessage: echoHandler });
     try {
       const result = await replayWebSocket({
         url: `ws://127.0.0.1:${server.port}/s`,
         frames: [
           { opcode: 'text', payload: Buffer.from('alpha').toString('base64'), delayMs: 0 },
-          { opcode: 'text', payload: Buffer.from('beta').toString('base64'), delayMs: 700 },
+          { opcode: 'text', payload: Buffer.from('beta').toString('base64'), delayMs: 1500 },
         ],
         timeoutMs: 10_000,
       });
@@ -170,6 +178,55 @@ describe('replayWebSocket', () => {
       expect(result.error).toBeUndefined();
       // A silent server must not hold the caller for the full timeout.
       expect(result.durationMs).toBeLessThan(5000);
+      // The only thing that distinguishes this from "the server was done": a
+      // server merely slower than the quiet period lands here too.
+      expect(result.stoppedBecause).toBe('idle');
+    } finally {
+      server.close();
+    }
+  }, 20_000);
+
+  it('reports a server-initiated close, with its code', async () => {
+    // Close code 1000 (normal closure) in the frame's two-byte payload. The
+    // socket is ended as well: Node's WebSocket completes the close handshake
+    // and then waits for the peer's FIN before it fires `close`, so a close
+    // frame on its own would leave this replay ending on the quiet period.
+    const closeFrame = encodeFrame('close', Buffer.from([0x03, 0xe8]));
+    const server = await startRawWsServer({
+      onOpen: (socket) => { socket.write(closeFrame); socket.end(); },
+    });
+    try {
+      const result = await replayWebSocket({
+        url: `ws://127.0.0.1:${server.port}/s`,
+        frames: [],
+        timeoutMs: 10_000,
+      });
+
+      expect(result.stoppedBecause).toBe('close');
+      expect(result.closeCode).toBe(1000);
+      expect(result.error).toBeUndefined();
+      // Ended on the close, not on the quiet period that was already armed.
+      expect(result.durationMs).toBeLessThan(500);
+    } finally {
+      server.close();
+    }
+  }, 20_000);
+
+  it('reports an abrupt disconnect as an abnormal close', async () => {
+    // No close handshake at all. Node's WebSocket reports this as close 1006
+    // without an error event, so `stoppedBecause` is 'close' and the code is
+    // what tells a reader the connection was cut rather than closed.
+    const server = await startRawWsServer({ onOpen: (socket) => socket.destroy() });
+    try {
+      const result = await replayWebSocket({
+        url: `ws://127.0.0.1:${server.port}/s`,
+        frames: [],
+        timeoutMs: 10_000,
+      });
+
+      expect(result.stoppedBecause).toBe('close');
+      expect(result.closeCode).toBe(1006);
+      expect(result.durationMs).toBeLessThan(500);
     } finally {
       server.close();
     }
@@ -191,6 +248,7 @@ describe('replayWebSocket', () => {
       });
 
       expect(result.error).toMatch(/timed out/);
+      expect(result.stoppedBecause).toBe('timeout');
       expect(result.received.length).toBeGreaterThan(1);
     } finally {
       for (const timer of timers) clearInterval(timer);
@@ -205,6 +263,7 @@ describe('replayWebSocket', () => {
       timeoutMs: 5000,
     });
     expect(result.error).toBeTruthy();
+    expect(result.stoppedBecause).toBe('error');
     expect(result.sentCount).toBe(0);
     expect(result.received).toEqual([]);
   }, 15_000);

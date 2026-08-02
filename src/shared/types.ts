@@ -133,6 +133,14 @@ export interface WsReplayRequest {
   timeoutMs?: number;
 }
 
+/**
+ * Why a replay stopped. A WebSocket has no response boundary, so this is the
+ * only thing that distinguishes "the server finished" from "we stopped waiting":
+ * `idle` means the quiet period elapsed, which may simply mean the server was
+ * slower to answer than the quiet period allows.
+ */
+export type WsReplayStopReason = 'idle' | 'close' | 'timeout' | 'error';
+
 export interface WsReplayResponse {
   /** Frames handed to the socket before the replay ended. */
   sentCount: number;
@@ -145,6 +153,7 @@ export interface WsReplayResponse {
   durationMs: number;
   /** The close code, when the connection closed before the replay ended. */
   closeCode: number | null;
+  stoppedBecause: WsReplayStopReason;
   /** Present only when the replay failed or timed out. */
   error?: string;
 }

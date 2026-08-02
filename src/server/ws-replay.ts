@@ -4,11 +4,22 @@ import type {
   WsReplayFrame,
   WsReplayRequest,
   WsReplayResponse,
+  WsReplayStopReason,
 } from '../shared/types.js';
 
 const DEFAULT_TIMEOUT = 30_000;
 /** Idle window after the last frame before we assume the server is done replying. */
 const QUIET_PERIOD = 500;
+
+/**
+ * The recorded frames a replay resends: the client's own data frames. Exported
+ * so a caller deciding whether a recording is fit to replay asks about the same
+ * frames this module would send, rather than re-deriving the predicate.
+ */
+export function isReplayableFrame(message: WebSocketMessage): boolean {
+  return message.direction === 'sent'
+    && (message.opcode === 'text' || message.opcode === 'binary');
+}
 
 /**
  * Build a replay request from a recorded connection: client-sent data frames
@@ -32,7 +43,7 @@ export function recordToWsReplayRequest(
   // so frames decoded from one chunk — which share a timestamp — keep their
   // recorded order.
   const sent = messages
-    .filter((m) => m.direction === 'sent' && (m.opcode === 'text' || m.opcode === 'binary'))
+    .filter(isReplayableFrame)
     .sort((a, b) => a.timestamp - b.timestamp);
 
   const frames: WsReplayFrame[] = sent.map((message, index) => ({
@@ -53,9 +64,11 @@ export function recordToWsReplayRequest(
  * Termination is a heuristic, because a WebSocket has no response boundary to
  * wait for: once every frame is sent, the replay ends after `QUIET_PERIOD` of
  * silence, or when the server closes, or at `timeoutMs` — whichever comes
- * first. Only the timeout is reported as an error. A server whose replies are
- * spaced further apart than the quiet period will therefore be recorded as
- * having stopped early; a server that keeps talking hits the timeout instead.
+ * first. `stoppedBecause` always says which, because the heuristic is not
+ * reliable enough to leave implicit: a server that takes longer than the quiet
+ * period to produce its *first* reply ends the replay as `idle` with nothing
+ * collected, which is not the same thing as a server that had nothing to say.
+ * Only the timeout and outright failures set `error`.
  *
  * The returned promise rejects only for a URL that is not a WebSocket URL.
  * Every network outcome resolves, carrying `error` when something went wrong,
@@ -88,7 +101,7 @@ export function replayWebSocket(request: WsReplayRequest): Promise<WsReplayRespo
     const socket = new WebSocket(request.url);
     socket.binaryType = 'arraybuffer';
 
-    const finish = (error?: string) => {
+    const finish = (stoppedBecause: WsReplayStopReason, error?: string) => {
       if (settled) return;
       settled = true;
       if (quietTimer) clearTimeout(quietTimer);
@@ -99,11 +112,12 @@ export function replayWebSocket(request: WsReplayRequest): Promise<WsReplayRespo
         received,
         durationMs: Date.now() - startedAt,
         closeCode,
+        stoppedBecause,
         ...(error ? { error } : {}),
       });
     };
 
-    hardTimer = setTimeout(() => finish('Replay timed out'), timeoutMs);
+    hardTimer = setTimeout(() => finish('timeout', 'Replay timed out'), timeoutMs);
 
     const armQuietTimer = () => {
       // Silence only means "the server is done" once we have stopped talking.
@@ -112,7 +126,7 @@ export function replayWebSocket(request: WsReplayRequest): Promise<WsReplayRespo
       // quiet period — a short sentCount reported as a clean run.
       if (!sendingComplete) return;
       if (quietTimer) clearTimeout(quietTimer);
-      quietTimer = setTimeout(() => finish(), QUIET_PERIOD);
+      quietTimer = setTimeout(() => finish('idle'), QUIET_PERIOD);
     };
 
     // Anything that throws inside an async handler becomes an unhandled
@@ -135,7 +149,7 @@ export function replayWebSocket(request: WsReplayRequest): Promise<WsReplayRespo
         sendingComplete = true;
         armQuietTimer();
       } catch (err) {
-        finish(`Failed while sending frames: ${(err as Error).message}`);
+        finish('error', `Failed while sending frames: ${(err as Error).message}`);
       }
     };
 
@@ -157,11 +171,11 @@ export function replayWebSocket(request: WsReplayRequest): Promise<WsReplayRespo
     // following our own `socket.close()` calls it a second time.
     socket.onclose = (event: CloseEvent) => {
       closeCode = event.code;
-      finish();
+      finish('close');
     };
 
     // Fires both for a connection that never opened and for one that broke
     // mid-replay, hence the wording: `sentCount` says which happened.
-    socket.onerror = () => finish(`WebSocket connection to ${request.url} failed`);
+    socket.onerror = () => finish('error', `WebSocket connection to ${request.url} failed`);
   });
 }

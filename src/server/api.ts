@@ -8,7 +8,7 @@ import type { RequestFilter, RequestRecord, WebSocketMessage } from '../shared/t
 import type { CertificateAuthority } from './ssl.js';
 import type { ReplayRequest } from '../shared/types.js';
 import { replay } from './replay.js';
-import { replayWebSocket, recordToWsReplayRequest } from './ws-replay.js';
+import { replayWebSocket, recordToWsReplayRequest, isReplayableFrame } from './ws-replay.js';
 import type { WsReplayFrame, WsReplayRequest } from '../shared/types.js';
 import { enableSystemProxy, disableSystemProxy, checkSystemProxyStatus } from '../cli/system-proxy.js';
 import type { Throttler } from './throttle.js';
@@ -58,28 +58,51 @@ function parsePositiveInt(raw: unknown, fallback: number): number | null {
   return Number.isInteger(n) && n >= 0 ? n : null;
 }
 
-/** Recorded frames a single replay will read out of a connection. */
+/** Frames a single replay will send, from either request form. */
 const MAX_REPLAY_FRAMES = 10_000;
 
 /**
- * Validates and normalises client-supplied replay frames.
- *
- * Malformed frames are rejected here rather than left to fail mid-send: a bad
- * base64 payload or a missing opcode would otherwise come back as a 200 whose
- * `error` field blames the connection for a client mistake. Returns null when
- * the input is not a usable frame list.
+ * Standard base64 — correct alphabet, correct length, correct padding.
+ * `Buffer.from(s, 'base64')` silently discards anything it doesn't recognise,
+ * so without this a payload like `"hello world!"` decodes to arbitrary bytes and
+ * gets replayed as garbage.
  */
-function parseWsReplayFrames(raw: unknown): WsReplayFrame[] | null {
-  if (!Array.isArray(raw)) return null;
+const BASE64 = /^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/;
+
+/**
+ * Validates and normalises client-supplied replay frames, returning either the
+ * frames or the reason they were refused.
+ *
+ * Everything checkable is checked here rather than left to fail mid-send: a
+ * missing opcode, a payload that is not really base64, or a frame list long
+ * enough to tie up the process would otherwise come back as a 200 whose `error`
+ * field blames the connection for a client mistake.
+ */
+function parseWsReplayFrames(raw: unknown): { frames: WsReplayFrame[] } | { error: string } {
+  if (!Array.isArray(raw)) {
+    return { error: 'frames must be an array' };
+  }
+  // Checked before the per-frame pass, so an over-long list is reported as such
+  // whatever its contents look like.
+  if (raw.length > MAX_REPLAY_FRAMES) {
+    return { error: `Too many frames: ${raw.length}; replay handles at most ${MAX_REPLAY_FRAMES}` };
+  }
+
   const frames: WsReplayFrame[] = [];
   for (const frame of raw as Partial<WsReplayFrame>[]) {
-    if (frame?.opcode !== 'text' && frame?.opcode !== 'binary') return null;
-    if (typeof frame.payload !== 'string') return null;
+    if (frame?.opcode !== 'text' && frame?.opcode !== 'binary') {
+      return { error: 'Each frame needs an opcode of "text" or "binary"' };
+    }
+    if (typeof frame.payload !== 'string' || !BASE64.test(frame.payload)) {
+      return { error: 'Each frame needs a base64-encoded payload string' };
+    }
     const delayMs = frame.delayMs ?? 0;
-    if (!Number.isFinite(delayMs) || delayMs < 0) return null;
+    if (!Number.isFinite(delayMs) || delayMs < 0) {
+      return { error: 'Each frame needs a non-negative delayMs' };
+    }
     frames.push({ opcode: frame.opcode, payload: frame.payload, delayMs });
   }
-  return frames;
+  return { frames };
 }
 
 export interface ProxyControl {
@@ -349,16 +372,27 @@ export function createApiRouter(
         });
         return;
       }
-      replayRequest = { ...recordToWsReplayRequest(record, messages.data), timeoutMs: body.timeoutMs };
-    } else if (typeof body.url === 'string' && body.url) {
-      const frames = parseWsReplayFrames(body.frames);
-      if (!frames) {
+      // A frame clipped at maxBodySize was recorded as a prefix of what the
+      // client really sent, with `truncated: 1` to say so. Resending that prefix
+      // delivers a corrupted message — truncated JSON, or text cut mid-codepoint
+      // — while the response would claim success, so refuse instead. Only the
+      // frames this replay would send matter: a clipped *server* reply says
+      // nothing about the fidelity of what we are about to send.
+      const truncated = messages.data.filter((m) => isReplayableFrame(m) && m.truncated !== 0);
+      if (truncated.length > 0) {
         res.status(400).json({
-          error: 'Each frame needs an opcode of "text" or "binary", a base64 payload string, and a non-negative delayMs',
+          error: `Connection has ${truncated.length} truncated client frame(s) recorded; replay would send corrupted payloads`,
         });
         return;
       }
-      replayRequest = { url: body.url, frames, timeoutMs: body.timeoutMs };
+      replayRequest = { ...recordToWsReplayRequest(record, messages.data), timeoutMs: body.timeoutMs };
+    } else if (typeof body.url === 'string' && body.url) {
+      const parsed = parseWsReplayFrames(body.frames);
+      if ('error' in parsed) {
+        res.status(400).json({ error: parsed.error });
+        return;
+      }
+      replayRequest = { url: body.url, frames: parsed.frames, timeoutMs: body.timeoutMs };
     } else {
       res.status(400).json({ error: 'Provide either requestId, or url and frames' });
       return;

@@ -329,6 +329,73 @@ describe('REST API', () => {
     }
   }, 20_000);
 
+  it('POST /api/websocket/replay refuses a connection with a truncated client frame', async () => {
+    db.insert(makeRequest({ id: 'ws-cut', kind: 'websocket', status: 101, url: 'ws://127.0.0.1:1/x' }));
+    db.insertWebSocketMessages([
+      // Recorded payload is a prefix: `size` is the true length, `truncated: 1`
+      // says the rest was clipped at maxBodySize. Resending the prefix would
+      // deliver a corrupted message while reporting success.
+      { id: 'c1', request_id: 'ws-cut', timestamp: 1000, direction: 'sent',
+        opcode: 'text', payload: Buffer.from('{"a":1'), size: 1_500_000, truncated: 1 },
+    ]);
+
+    const res = await httpReq(port, '/api/websocket/replay', 'POST', { requestId: 'ws-cut' });
+    expect(res.status).toBe(400);
+    expect(JSON.parse(res.body).error).toMatch(/truncated/i);
+  });
+
+  it('POST /api/websocket/replay still replays when only a server frame was truncated', async () => {
+    // A clipped *reply* says nothing about the fidelity of what replay sends, so
+    // refusing here would be a false refusal on a perfectly replayable capture.
+    const server = await startRawWsServer({ onMessage: echoHandler });
+    try {
+      db.insert(makeRequest({
+        id: 'ws-cut-rx',
+        kind: 'websocket',
+        status: 101,
+        url: `http://127.0.0.1:${server.port}/rx`,
+      }));
+      db.insertWebSocketMessages([
+        { id: 'x1', request_id: 'ws-cut-rx', timestamp: 1000, direction: 'sent',
+          opcode: 'text', payload: Buffer.from('ping'), size: 4, truncated: 0 },
+        { id: 'x2', request_id: 'ws-cut-rx', timestamp: 1001, direction: 'received',
+          opcode: 'text', payload: Buffer.from('huge'), size: 1_500_000, truncated: 1 },
+      ]);
+
+      const res = await httpReq(port, '/api/websocket/replay', 'POST', { requestId: 'ws-cut-rx' });
+      expect(res.status).toBe(200);
+      const body = JSON.parse(res.body);
+      expect(body.sentCount).toBe(1);
+      expect(Buffer.from(body.received[0].payload, 'base64').toString()).toBe('re:ping');
+    } finally {
+      server.close();
+    }
+  }, 20_000);
+
+  it('POST /api/websocket/replay rejects a payload that is not really base64', async () => {
+    // Buffer.from() discards unrecognised characters instead of throwing, so an
+    // unvalidated payload replays as arbitrary bytes under a 200.
+    const res = await httpReq(port, '/api/websocket/replay', 'POST', {
+      url: 'ws://127.0.0.1:1/x',
+      frames: [{ opcode: 'text', payload: 'hello world!', delayMs: 0 }],
+    });
+    expect(res.status).toBe(400);
+    expect(JSON.parse(res.body).error).toMatch(/base64/i);
+  });
+
+  it('POST /api/websocket/replay caps the frame count on the explicit-url form', async () => {
+    // Reported by count before the per-frame shape pass, so the ceiling is what
+    // a caller hears regardless of what the entries look like. Values are kept
+    // tiny deliberately: express.json()'s 100kb default would otherwise reject
+    // the body before the endpoint ever sees it.
+    const res = await httpReq(port, '/api/websocket/replay', 'POST', {
+      url: 'ws://127.0.0.1:1/x',
+      frames: Array.from({ length: 10_001 }, () => 0),
+    });
+    expect(res.status).toBe(400);
+    expect(JSON.parse(res.body).error).toMatch(/Too many frames: 10001/);
+  });
+
   it('POST /api/websocket/replay refuses a connection with more frames than it can replay', async () => {
     db.insert(makeRequest({ id: 'ws-huge', kind: 'websocket', status: 101 }));
     // One past the 10 000-frame ceiling. Replaying the first 10 000 and
