@@ -561,7 +561,13 @@ describe('ProxyServer - recording failures', () => {
     } finally {
       upstream.close();
     }
-  });
+    // An explicit budget, like every other test in this file that stands up a
+    // server: this one starts a proxy, an upstream WebSocket server and a real
+    // upgrade, then sleeps 300ms for the flush timer. It has been observed
+    // exceeding the 5s default under a loaded full-suite run — a flake in a test
+    // whose subject (a proxy surviving a failing database) has nothing to do with
+    // scheduling latency.
+  }, 20_000);
 });
 
 /** Answers every request with a caller-supplied raw HTTP response, byte for byte. */
