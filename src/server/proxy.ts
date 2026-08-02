@@ -6,7 +6,7 @@ import type { CertificateAuthority } from './ssl.js';
 import type { EventManager } from './events.js';
 import type { Config, RequestRecord, WebSocketMessage } from '../shared/types.js';
 import { listenWithRetry } from './port-utils.js';
-import { recordSafely } from '../shared/recording-safety.js';
+import { recordSafely } from '../shared/never-fatal.js';
 import { handleExchange, resolveHttpTarget, resolveMitmTarget } from './exchange.js';
 import type { ExchangeDeps } from './exchange.js';
 import { handleWebSocketUpgrade } from './websocket.js';
@@ -82,8 +82,9 @@ export class ProxyServer {
 
   /**
    * Requests are flushed before frames: a WebSocket connection's row is always
-   * queued before any of its frames, so draining in this order means a reader
-   * can never find a frame whose parent row has not landed yet.
+   * queued before any of its frames, so **as long as the request insert
+   * succeeds**, draining in this order means a reader can never find a frame
+   * whose parent row has not landed yet.
    *
    * This runs from a `setInterval`, where an escaping throw is an uncaught
    * exception and therefore the end of the process — and it is the one recording
@@ -95,8 +96,19 @@ export class ProxyServer {
    * Each batch is taken off its queue before the insert, so a failed batch is
    * **dropped rather than retried**. Putting it back would have it retried every
    * 100ms forever, growing the queue without bound and turning a transient
-   * failure into a permanent one. The two queues are guarded separately so a
-   * failing request insert does not also cost the frames.
+   * failure into a permanent one.
+   *
+   * The two queues are guarded separately, so a failing request insert does not
+   * also cost the frames — but that is exactly what qualifies the ordering
+   * guarantee above. `insertBatch` is one transaction, so a single unwritable
+   * record (an oversized `response_body` raising `SQLITE_TOOBIG`, say) drops the
+   * whole batch, including any WebSocket connection row in it, while the frame
+   * insert on the same tick can still succeed. That leaves **orphaned
+   * `websocket_messages`**: rows whose `request_id` names a `requests` row that
+   * never landed. Nothing rejects them — `request_id` carries an index, not a
+   * foreign key — and every reader and both retention deletes are driven off
+   * `requests`, so they would be invisible and unreclaimable. `Cleanup.run()`
+   * sweeps them; see `Database.deleteOrphanedWebSocketMessages`.
    */
   private flushWrites(): void {
     if (this.writeQueue.length > 0) {

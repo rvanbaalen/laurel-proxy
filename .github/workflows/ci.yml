@@ -21,6 +21,12 @@ jobs:
 
       - run: npm ci --legacy-peer-deps
 
+      # Runs before the build so a type error is reported as one, rather than as
+      # whichever build step happens to trip over it first. This is also the only
+      # thing that checks src/ui/** on its own terms: vite build strips types
+      # without checking them, and the base project excludes the UI entirely.
+      - run: npm run typecheck
+
       - run: npm run build
 
       - run: npm test

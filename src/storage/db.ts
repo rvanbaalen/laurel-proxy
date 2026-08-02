@@ -280,6 +280,33 @@ export class Database {
       .changes;
   }
 
+  /**
+   * Deletes frames whose connection row is missing, and returns how many went.
+   *
+   * These can exist because the write flush guards its two inserts separately
+   * and drops what it cannot write: one unwritable record fails the whole
+   * `insertBatch` transaction — including a WebSocket connection row — while the
+   * frame insert on the same tick succeeds. Nothing else would ever reclaim
+   * them. `request_id` carries an index rather than a foreign key, so the
+   * database does not reject them; every reader looks frames up by a
+   * `requests.id` that no longer exists, so they are invisible; and both
+   * retention deletes select from `requests`, so `deleteOldest` reports 0 and
+   * gives up while the orphans remain. Left alone they are a permanent leak.
+   *
+   * `NOT EXISTS` rather than `NOT IN` on purpose: SQLite allows NULL in a
+   * non-INTEGER `PRIMARY KEY` column, and a single NULL `requests.id` would make
+   * a `NOT IN` predicate never true — the sweep would silently stop reclaiming
+   * anything, which is the exact failure it exists to fix.
+   */
+  deleteOrphanedWebSocketMessages(): number {
+    return this.db
+      .prepare(
+        `DELETE FROM websocket_messages WHERE NOT EXISTS
+         (SELECT 1 FROM requests WHERE requests.id = websocket_messages.request_id)`,
+      )
+      .run().changes;
+  }
+
   incrementalVacuum(): void {
     this.db.pragma('incremental_vacuum');
   }

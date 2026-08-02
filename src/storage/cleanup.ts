@@ -1,6 +1,6 @@
 import type { Database } from './db.js';
 import type { Config } from '../shared/types.js';
-import { recordSafely } from '../shared/recording-safety.js';
+import { neverFatal } from '../shared/never-fatal.js';
 
 export class Cleanup {
   private timer: ReturnType<typeof setInterval> | null = null;
@@ -34,9 +34,13 @@ export class Cleanup {
    * no queue here: the work to be done is derived from the database's own state,
    * so the next tick recomputes it and retries. That retry is bounded by
    * construction — a failing pass leaves nothing behind to accumulate.
+   *
+   * `neverFatal` rather than `recordSafely`: nothing here records anything, and
+   * keeping the recording name for the recording boundary is what makes that
+   * boundary greppable.
    */
   run(): void {
-    recordSafely(() => {
+    neverFatal(() => {
       // Delete by age
       const cutoff = Date.now() - this.config.maxAge;
       this.db.deleteOlderThan(cutoff);
@@ -46,6 +50,15 @@ export class Cleanup {
         const deleted = this.db.deleteOldest(100);
         if (deleted === 0) break;
       }
+
+      // Reclaim frames whose connection row never landed. The write flush
+      // guards its two inserts separately and drops what it cannot write, so a
+      // batch that fails while the frames on the same tick succeed leaves rows
+      // no reader can see and no other delete can reach — both retention
+      // deletes above select from `requests`. This is the only path that
+      // reclaims them, and it runs before the vacuum so the pages it frees are
+      // handed back on this pass rather than in five minutes' time.
+      this.db.deleteOrphanedWebSocketMessages();
 
       // Reclaim disk space
       this.db.incrementalVacuum();

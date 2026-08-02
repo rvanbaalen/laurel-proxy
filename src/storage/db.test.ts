@@ -321,6 +321,64 @@ describe('Database', () => {
     expect(db.getWebSocketMessages('keep-conn').total).toBe(1);
   });
 
+  it('sweeps websocket messages whose connection row never landed', () => {
+    // Exactly the state the write flush can leave behind: the frame insert
+    // succeeded on a tick whose request insert was dropped, so 'lost-conn' has
+    // frames but no row. Nothing else can reclaim these — no foreign key rejects
+    // them, no reader can see them, and both retention deletes select from
+    // `requests`, so `deleteOldest` reports 0 and leaves them forever.
+    db.insert({ ...baseRecord(), id: 'landed-conn', kind: 'websocket' });
+    db.insertWebSocketMessages([
+      { id: 'orphan-1', request_id: 'lost-conn', timestamp: 1, direction: 'sent',
+        opcode: 'text', payload: Buffer.from('a'), size: 1, truncated: 0 },
+      { id: 'orphan-2', request_id: 'lost-conn', timestamp: 2, direction: 'received',
+        opcode: 'text', payload: Buffer.from('b'), size: 1, truncated: 0 },
+      { id: 'kept', request_id: 'landed-conn', timestamp: 3, direction: 'sent',
+        opcode: 'text', payload: Buffer.from('c'), size: 1, truncated: 0 },
+    ]);
+
+    // Retention on its own cannot see the leak, which is why the sweep exists.
+    expect(db.deleteOldest(100)).toBe(1);
+    expect(db.getWebSocketMessages('lost-conn').total).toBe(2);
+
+    expect(db.deleteOrphanedWebSocketMessages()).toBe(2);
+    expect(db.getWebSocketMessages('lost-conn').total).toBe(0);
+    // Idempotent: a second pass finds nothing left to reclaim.
+    expect(db.deleteOrphanedWebSocketMessages()).toBe(0);
+  });
+
+  it('keeps frames whose connection row exists when sweeping orphans', () => {
+    db.insert({ ...baseRecord(), id: 'live-conn', kind: 'websocket' });
+    db.insertWebSocketMessages([
+      { id: 'live-msg', request_id: 'live-conn', timestamp: 1, direction: 'sent',
+        opcode: 'text', payload: Buffer.from('a'), size: 1, truncated: 0 },
+    ]);
+
+    expect(db.deleteOrphanedWebSocketMessages()).toBe(0);
+    expect(db.getWebSocketMessages('live-conn').total).toBe(1);
+  });
+
+  it('sweeps orphans even when a request row has a NULL id', () => {
+    // SQLite allows NULL in a non-INTEGER PRIMARY KEY column, so `requests` can
+    // hold a NULL id. A `NOT IN (SELECT id FROM requests)` sweep would evaluate
+    // to NULL for every row and reclaim nothing at all; `NOT EXISTS` is immune.
+    const raw = new BetterSqlite3(dbPath);
+    try {
+      raw.prepare(
+        `INSERT INTO requests (id, timestamp, method, url, host, path, protocol)
+         VALUES (NULL, 1, 'GET', 'http://x/', 'x', '/', 'http')`,
+      ).run();
+    } finally {
+      raw.close();
+    }
+    db.insertWebSocketMessages([
+      { id: 'orphan-null', request_id: 'gone-conn', timestamp: 1, direction: 'sent',
+        opcode: 'text', payload: Buffer.from('a'), size: 1, truncated: 0 },
+    ]);
+
+    expect(db.deleteOrphanedWebSocketMessages()).toBe(1);
+  });
+
   it('deletes all websocket messages on deleteAll', () => {
     db.insert({ ...baseRecord(), id: 'conn-wipe', kind: 'websocket' });
     db.insertWebSocketMessages([
