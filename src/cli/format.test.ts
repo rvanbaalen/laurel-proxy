@@ -476,6 +476,47 @@ describe('formatWsMessages', () => {
     expect(parsed.data[0].payload_encoding).toBe('utf8');
   });
 
+  it('does not present a page as the whole collection in table format', () => {
+    // A 1200-frame connection read at the default --limit 500 printed a header
+    // saying "1200 messages" above 500 rows, with nothing to say the rest were
+    // missing. `formatRequests` has always had this footer; this format didn't.
+    const page = Array.from({ length: 2 }, (_, i) => wsMessage({ id: `m${i}` }));
+    const out = formatWsMessages({ data: page, total: 1200, limit: 2, offset: 0 }, 'table');
+    expect(out).toContain('1200');
+    expect(out).toContain('showing 2');
+    expect(out).toContain('offset 0');
+  });
+
+  it('scopes the agent summary breakdown to the page it describes', () => {
+    // The bug this pins: `${total} messages captured (${sent} sent, ${received}
+    // received)` mixed a collection-scoped total with a page-scoped breakdown, so
+    // a 1200-frame connection read at limit 500 reported "1200 messages captured
+    // (350 sent, 150 received)" — three numbers that cannot all be about the same
+    // set of frames.
+    const page = [wsMessage(), wsMessage({ id: 'm2', direction: 'received' })];
+    const parsed = JSON.parse(formatWsMessages({ data: page, total: 1200, limit: 2, offset: 100 }, 'agent'));
+    expect(parsed.summary).toContain('1200');
+    expect(parsed.summary).toContain('showing 2');
+    expect(parsed.summary).toContain('offset 100');
+    expect(parsed.summary).toContain('1 sent');
+    expect(parsed.summary).toContain('1 received');
+    // The page numbers must not be presented as the connection's totals.
+    expect(parsed.summary).not.toMatch(/1200 message\(?s?\)? captured \(1 sent/);
+  });
+
+  it('distinguishes an empty page of a non-empty connection from an empty connection', () => {
+    const emptyConnection = formatWsMessages({ data: [], total: 0, limit: 500, offset: 0 }, 'table');
+    expect(emptyConnection).toContain('No messages');
+
+    // An offset past the end, or `--limit 0`, is not the same thing as a
+    // connection that carried nothing — saying "No messages captured" there
+    // would report a paging choice as an absence of traffic.
+    const emptyPage = formatWsMessages({ data: [], total: 7, limit: 500, offset: 900 }, 'table');
+    expect(emptyPage).not.toContain('No messages captured');
+    expect(emptyPage).toContain('7');
+    expect(emptyPage).toContain('900');
+  });
+
   it('carries the full payload uncut in json/agent format, unlike the truncated table preview', () => {
     // Same no-silent-truncation property already guarded for
     // formatWsMessageLine (the streaming path), pinned here for the

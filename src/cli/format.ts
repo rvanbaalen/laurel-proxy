@@ -584,13 +584,34 @@ export function formatWsMessages(
     if (format === 'agent') {
       const sent = result.data.filter((m) => m.direction === 'sent').length;
       const received = result.data.length - sent;
-      output.summary = `${result.total} message${result.total === 1 ? '' : 's'} captured (${sent} sent, ${received} received)`;
+      // The total is collection-scoped and the breakdown is page-scoped, so the
+      // summary has to say which is which. It previously read
+      // "1200 messages captured (350 sent, 150 received)" for a 1200-frame
+      // connection read at the default limit of 500 — three numbers that cannot
+      // all describe the same set of frames, with nothing to say so.
+      output.summary =
+        `${result.total} message${result.total === 1 ? '' : 's'} captured; `
+        + `showing ${result.data.length} (offset ${result.offset}): `
+        + `${sent} sent, ${received} received`;
     }
     return JSON.stringify(output, null, 2);
   }
 
+  // The page footer, in the same shape `formatRequests` has always used. A header
+  // saying "1200 messages" above 500 rows presents a page as the whole
+  // collection; the reader needs both numbers to know there is more to fetch.
+  const pageNote = pc.dim(
+    `${result.total} total (showing ${result.data.length}, offset ${result.offset})`,
+  );
+
   if (result.data.length === 0) {
-    return `\n  ${pc.dim('No messages captured for this connection.')}\n`;
+    // An offset past the end, or `--limit 0`, is a paging outcome rather than an
+    // empty connection. Reporting it as "no messages captured" would describe a
+    // choice the caller made as an absence of traffic.
+    if (result.total === 0) {
+      return `\n  ${pc.dim('No messages captured for this connection.')}\n`;
+    }
+    return `\n  ${pageNote}\n`;
   }
 
   const rows = result.data.map((m) => {
@@ -602,7 +623,7 @@ export function formatWsMessages(
   });
 
   const header = `\n  ${pc.dim(`${result.total} message${result.total === 1 ? '' : 's'}`)}  (${pc.green('→')} client→server, ${pc.blue('←')} server→client)\n`;
-  return [header, ...rows, ''].join('\n');
+  return [header, ...rows, `\n  ${pageNote}`, ''].join('\n');
 }
 
 export function formatWsMessageLine(message: WebSocketMessage, format: string): string {

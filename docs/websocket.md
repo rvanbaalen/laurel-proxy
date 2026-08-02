@@ -82,6 +82,14 @@ laurel-proxy messages <id> --format json      # json | table | agent
 `<id>` must be the id of a request with `kind: 'websocket'`; pointing it at an HTTP
 request id fails with a message telling you to use `laurel-proxy request <id>` instead.
 
+**The output is one page, not the whole connection.** `--limit` defaults to 500, and
+a busy connection will have more frames than that. Every format says so:
+`--format table` prints a `N total (showing M, offset O)` footer like
+`laurel-proxy requests` does, and `--format json`/`--format agent` carry `total`,
+`limit` and `offset` alongside `data` — with the agent `summary` labelling which
+numbers are collection-scoped (`total ... captured`) and which describe the page
+(`showing M (offset O): X sent, Y received`). Raise `--limit` to fetch more.
+
 ## REST API
 
 ### `GET /api/requests/:id/messages?limit&offset`
