@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useCallback } from 'react';
 
 export interface RequestRecord {
   id: string;
@@ -107,6 +107,72 @@ export async function replayRequest(request: ReplayRequest): Promise<ReplayRespo
     throw new Error(err.error || 'Replay failed');
   }
   return res.json();
+}
+
+export interface ThrottleState {
+  settings: { enabled: boolean; downKbps: number; upKbps: number; latencyMs: number };
+  presets: Record<string, { downKbps: number; upKbps: number; latencyMs: number }>;
+}
+
+export async function getThrottle(): Promise<ThrottleState> {
+  const res = await fetch(`${API_BASE}/throttle`);
+  if (!res.ok) throw new Error('Failed to load throttle settings');
+  return res.json();
+}
+
+export async function setThrottle(
+  payload: { preset: string } | { enabled: boolean; downKbps?: number; upKbps?: number; latencyMs?: number },
+): Promise<ThrottleState['settings']> {
+  const res = await fetch(`${API_BASE}/throttle`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  });
+  if (!res.ok) throw new Error((await res.json()).error ?? 'Failed to update throttle');
+  return (await res.json()).settings;
+}
+
+/**
+ * Which dropdown option the current throttle settings correspond to.
+ *
+ * - 'off' when throttling is disabled (or state hasn't loaded).
+ * - a preset key only when all three values (down/up/latency) match exactly —
+ *   a partial match (e.g. right downKbps, wrong latencyMs) is NOT a preset.
+ * - 'custom' when enabled but no preset matches exactly. This is reachable
+ *   because the CLI/API accept arbitrary --down/--up/--latency values.
+ */
+export function activePreset(state: ThrottleState | null): string {
+  if (!state || !state.settings.enabled) return 'off';
+  const { downKbps, upKbps, latencyMs } = state.settings;
+  const match = Object.entries(state.presets).find(
+    ([, p]) => p.downKbps === downKbps && p.upKbps === upKbps && p.latencyMs === latencyMs,
+  );
+  return match ? match[0] : 'custom';
+}
+
+/**
+ * Loads throttle state and polls the server so the display stays accurate
+ * even when throttling was changed from elsewhere (e.g. the `throttle` CLI
+ * command) while the UI is open. Mirrors the polling pattern `Controls`
+ * already uses for proxy status. Independent components (the toolbar pill
+ * and the traffic view's duration note) each call this on their own rather
+ * than threading throttle state through `App` — the endpoint is cheap and
+ * this avoids adding shared/global state for a single small feature.
+ */
+export function useThrottle(pollMs = 5000): { throttle: ThrottleState | null; refresh: () => void } {
+  const [throttle, setThrottleState] = useState<ThrottleState | null>(null);
+
+  const refresh = useCallback(() => {
+    getThrottle().then(setThrottleState).catch(() => {});
+  }, []);
+
+  useEffect(() => {
+    refresh();
+    const timer = setInterval(refresh, pollMs);
+    return () => clearInterval(timer);
+  }, [refresh, pollMs]);
+
+  return { throttle, refresh };
 }
 
 export interface SSEState {

@@ -1,5 +1,6 @@
 import { useState, useMemo, useCallback, useRef } from 'react';
 import { CaretUp, CaretDown, CaretUpDown } from '@phosphor-icons/react';
+import { useThrottle } from '../client.ts';
 import type { RequestRecord } from '../client.ts';
 
 interface TrafficListProps {
@@ -93,6 +94,8 @@ const renderCell = (req: RequestRecord, key: SortKey) => {
 };
 
 export function TrafficList({ requests, selectedId, onSelect }: TrafficListProps) {
+  const { throttle } = useThrottle();
+  const throttleEnabled = !!throttle?.settings.enabled;
   const [sortKey, setSortKey] = useState<SortKey>('timestamp');
   const [sortDir, setSortDir] = useState<SortDir>('desc');
   const [colWidths, setColWidths] = useState(INITIAL_WIDTHS);
@@ -165,9 +168,13 @@ export function TrafficList({ requests, selectedId, onSelect }: TrafficListProps
                 key={col.key}
                 className={`px-4 py-1.5 relative cursor-pointer select-none text-[10px] font-semibold uppercase tracking-[0.05em] text-text-muted hover:text-text-secondary transition-colors ${col.align === 'right' ? 'text-right' : ''} ${col.hideClass || ''}`}
                 onClick={() => handleSort(col.key)}
+                title={col.key === 'duration' && throttleEnabled ? 'Throttling is enabled — durations include simulated delay' : undefined}
               >
                 <span className="inline-flex items-center gap-1">
                   {col.label}
+                  {col.key === 'duration' && throttleEnabled && (
+                    <span className="text-accent normal-case tracking-normal" aria-hidden="true">*</span>
+                  )}
                   <SortIcon active={sortKey === col.key} dir={sortDir} />
                 </span>
                 {i < COLUMNS.length - 1 && (

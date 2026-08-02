@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef, useLayoutEffect, type RefObject } from 'react';
-import { fetchStatus, startProxy, stopProxy, clearRequests, fetchSystemProxyStatus, enableSystemProxy, disableSystemProxy } from '../client.ts';
+import { fetchStatus, startProxy, stopProxy, clearRequests, fetchSystemProxyStatus, enableSystemProxy, disableSystemProxy, setThrottle, activePreset, useThrottle } from '../client.ts';
 import type { ProxyStatus } from '../client.ts';
 
 interface ControlsProps {
@@ -60,6 +60,24 @@ export function Controls({ onClear, statusEvent, activeView, onViewChange, repea
 
   const handleClear = async () => { await clearRequests(); onClear(); await loadStatus(); };
 
+  const { throttle, refresh: refreshThrottle } = useThrottle();
+  const preset = activePreset(throttle);
+  const throttleEnabled = !!throttle?.settings.enabled;
+
+  const onPresetChange = async (nextPreset: string) => {
+    try {
+      await setThrottle({ preset: nextPreset });
+    } catch {
+      // Leave the previously confirmed state visible rather than showing
+      // a value the server never accepted.
+    } finally {
+      // Re-fetch rather than trust the local optimistic value, so the
+      // dropdown always reflects what the server actually has (whether the
+      // PUT succeeded, failed, or something else changed it concurrently).
+      refreshThrottle();
+    }
+  };
+
   return (
     <div className="flex items-center gap-3 px-4 py-2.5 border-b border-border-subtle bg-bg-primary h-12">
       {/* Logo */}
@@ -95,6 +113,28 @@ export function Controls({ onClear, statusEvent, activeView, onViewChange, repea
         </svg>
         System Proxy
       </button>
+
+      {/* Throttle control */}
+      <select
+        value={preset}
+        onChange={(e) => onPresetChange(e.target.value)}
+        title={
+          throttleEnabled
+            ? `Throttling enabled (${preset}) — recorded durations include simulated delay`
+            : 'Throttling disabled — select a network profile to simulate a slower connection'
+        }
+        className={`px-2.5 py-1 rounded-full text-[11px] font-medium border outline-none cursor-pointer transition-colors ${
+          throttleEnabled
+            ? 'bg-accent/10 text-accent border-accent/20 hover:bg-accent/20'
+            : 'bg-bg-secondary text-text-muted border-border hover:border-text-muted hover:text-text-secondary'
+        }`}
+      >
+        <option value="off">No Throttle</option>
+        {Object.keys(throttle?.presets ?? {}).map((key) => (
+          <option key={key} value={key}>{key}</option>
+        ))}
+        {preset === 'custom' && <option value="custom" disabled>custom</option>}
+      </select>
 
       {/* Filter input */}
       <div className="flex-1 max-w-lg flex items-center gap-2 px-3 py-1.5 bg-bg-secondary border border-border-subtle rounded-md text-xs text-text-muted cursor-text min-w-0 mx-auto transition-[border-color,box-shadow] duration-150 focus-within:border-accent/30 focus-within:shadow-[0_0_8px_rgba(34,197,94,0.08)]"
