@@ -409,6 +409,24 @@ export function describeReplayOutcome(response: WsReplayResponse): WsReplayOutco
   }
 }
 
+/**
+ * Merges a freshly-fetched page of messages with whatever is already held
+ * locally (e.g. a frame appended live via the `ws-message` SSE event while
+ * the fetch was still in flight). The fetch result is not trusted as
+ * necessarily complete: if the SSE stream delivered a frame between the
+ * fetch firing and it resolving, and the fetch's own DB read predates that
+ * frame, blindly replacing local state with the fetch result would silently
+ * drop it — the connection would then appear to have carried less traffic
+ * than it actually did. Dedupes by id (the fetched copy wins on conflict)
+ * and sorts by timestamp so the race can't reorder frames either.
+ */
+export function mergeWsMessages(existing: UiWsMessage[], fetched: UiWsMessage[]): UiWsMessage[] {
+  const byId = new Map<string, UiWsMessage>();
+  for (const m of fetched) byId.set(m.id, m);
+  for (const m of existing) if (!byId.has(m.id)) byId.set(m.id, m);
+  return Array.from(byId.values()).sort((a, b) => a.timestamp - b.timestamp);
+}
+
 export type WsMessagesState = 'loading' | 'loaded' | 'error';
 
 export interface UseWsMessagesResult {
@@ -441,7 +459,10 @@ export function useWsMessages(requestId: string): UseWsMessagesResult {
     setError(null);
     getMessages(requestId).then((result) => {
       if (cancelled) return;
-      setData({ messages: result.data, total: result.total });
+      setData((prev) => {
+        const messages = mergeWsMessages(prev.messages, result.data);
+        return { messages, total: Math.max(result.total, messages.length) };
+      });
       setState('loaded');
     }).catch((err) => {
       if (cancelled) return;

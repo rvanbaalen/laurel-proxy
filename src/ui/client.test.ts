@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
-import { activePreset, escapeWsControlChars, formatWsPayload, describeReplayOutcome } from './client.ts';
-import type { ThrottleState, WsOpcode, WsReplayResponse } from './client.ts';
+import { activePreset, escapeWsControlChars, formatWsPayload, describeReplayOutcome, mergeWsMessages } from './client.ts';
+import type { ThrottleState, WsOpcode, WsReplayResponse, UiWsMessage } from './client.ts';
 
 function b64(s: string): string {
   return Buffer.from(s, 'utf8').toString('base64');
@@ -213,5 +213,41 @@ describe('describeReplayOutcome', () => {
     const r = response({ stoppedBecause: 'close', closeCode: null });
     const outcome = describeReplayOutcome(r);
     expect(outcome.summary).not.toMatch(/close code/i);
+  });
+});
+
+describe('mergeWsMessages', () => {
+  function fixture(id: string, timestamp: number): UiWsMessage {
+    return { id, request_id: 'r1', timestamp, direction: 'sent', opcode: 'text', payload: null, size: 0, truncated: 0 };
+  }
+
+  it('keeps a message that only exists locally (e.g. arrived live via SSE while the fetch was in flight)', () => {
+    // If the initial GET's DB snapshot predates a frame that the SSE stream
+    // already delivered, blindly overwriting local state with the fetch
+    // result would silently drop that frame. It must survive the merge.
+    const local = [fixture('live-only', 5)];
+    const fetched = [fixture('a', 1), fixture('b', 2)];
+    const merged = mergeWsMessages(local, fetched);
+    expect(merged.map((m) => m.id)).toEqual(expect.arrayContaining(['live-only', 'a', 'b']));
+    expect(merged).toHaveLength(3);
+  });
+
+  it('dedupes by id, preferring the fetched copy over the local one', () => {
+    const local = [{ ...fixture('a', 1), size: 999 }];
+    const fetched = [fixture('a', 1)];
+    const merged = mergeWsMessages(local, fetched);
+    expect(merged).toHaveLength(1);
+    expect(merged[0].size).toBe(0);
+  });
+
+  it('sorts the merged result by timestamp', () => {
+    const local = [fixture('late', 100)];
+    const fetched = [fixture('mid', 50), fixture('early', 10)];
+    const merged = mergeWsMessages(local, fetched);
+    expect(merged.map((m) => m.id)).toEqual(['early', 'mid', 'late']);
+  });
+
+  it('returns an empty array when both inputs are empty', () => {
+    expect(mergeWsMessages([], [])).toEqual([]);
   });
 });
