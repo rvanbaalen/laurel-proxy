@@ -4,3 +4,4 @@ dist/
 *.db-wal
 *.db-shm
 .gstack/
+.DS_Store
