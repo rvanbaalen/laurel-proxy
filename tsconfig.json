@@ -10,6 +10,13 @@
     "declaration": true,
     "resolveJsonModule": true,
     "sourceMap": true,
+    // This project exists to type-check, not to build: its `include` covers
+    // `tests/**` and it has no `rootDir`, so a stray `tsc -p tsconfig.json` wrote
+    // `dist/src/**` *and* `dist/tests/helpers/*.js` — and `package.json` ships
+    // `files: ["dist"]` with no clean step, so test scaffolding could reach the
+    // published package. `tsconfig.server.json` sets `noEmit: false` because it
+    // inherits this, and it is the only project that emits.
+    "noEmit": true,
     "outDir": "./dist",
     "baseUrl": "."
   },

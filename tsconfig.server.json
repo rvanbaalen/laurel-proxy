@@ -1,6 +1,10 @@
 {
   "extends": "./tsconfig.json",
   "compilerOptions": {
+    // The base config sets `noEmit` so that a bare `tsc -p tsconfig.json` cannot
+    // write a `dist/` tree (including compiled test helpers) that `files: ["dist"]`
+    // would then publish. This is the one project that builds, so it opts back in.
+    "noEmit": false,
     "outDir": "./dist",
     // Set here rather than in the base config: the base config also type-checks
     // `tests/`, which lives outside `src/`. Only the emitting project needs it.
