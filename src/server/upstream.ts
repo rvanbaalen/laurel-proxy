@@ -454,6 +454,19 @@ interface PooledSession {
 export class UpstreamTransport {
   private alpn = new Map<string, AlpnEntry>();
   private sessions = new Map<string, PooledSession>();
+  /**
+   * Probes and connects already under way, keyed like the caches they will fill.
+   *
+   * Without these, both {@link negotiate} and {@link acquireSession} read a map
+   * and then await, so every request that arrives before the first one finishes
+   * misses the cache and starts its own work: measured at 20 TCP connections and
+   * 10 h2 sessions for 10 concurrent requests to a cold origin — *worse* than the
+   * `node:https` code this replaced, and precisely the shape of a browser page
+   * load, the burst the pooling exists for. Sharing the in-flight promise is what
+   * makes the cache a cache rather than a same-request memo.
+   */
+  private alpnInFlight = new Map<string, Promise<NegotiatedProtocol>>();
+  private sessionInFlight = new Map<string, Promise<PooledSession>>();
   private closed = false;
   private readonly opts: Required<Omit<UpstreamOptions, 'connect'>> & {
     connect: NonNullable<UpstreamOptions['connect']>;
@@ -485,6 +498,12 @@ export class UpstreamTransport {
       pooled.session.destroy();
     }
     this.alpn.clear();
+    // In-flight work needs no cancelling: a probe socket is `unref`'d and gets
+    // destroyed by its own `finish`, and a handshake that completes after this
+    // sees `closed` and destroys the session it just made. Dropping the entries
+    // only keeps a post-close caller from being handed a session that is gone.
+    this.alpnInFlight.clear();
+    this.sessionInFlight.clear();
   }
 
   async request(init: UpstreamRequestInit): Promise<UpstreamResponse> {
@@ -567,22 +586,39 @@ export class UpstreamTransport {
 
   // ---- ALPN ----------------------------------------------------------------
 
-  private async negotiate(key: string, target: UpstreamTarget): Promise<NegotiatedProtocol> {
+  private negotiate(key: string, target: UpstreamTarget): Promise<NegotiatedProtocol> {
     const cached = this.alpn.get(key);
     if (cached) {
-      if (cached.expiresAt > Date.now()) return cached.protocol;
+      if (cached.expiresAt > Date.now()) return Promise.resolve(cached.protocol);
       this.alpn.delete(key);
     }
 
-    const probed = await this.probeAlpn(target);
-    // A failed probe is not evidence about the origin's protocols — it is
-    // usually the origin being unreachable. Caching it would let one bad moment
-    // pin the origin, so we don't, and the HTTP/1.1 attempt that follows fails
-    // exactly as it does today.
-    if (probed === null) return 'http/1.1';
+    // A concurrent caller joins the probe already in flight rather than opening a
+    // second TLS connection to ask the same question.
+    const running = this.alpnInFlight.get(key);
+    if (running) return running;
 
-    this.rememberAlpn(key, probed);
-    return probed;
+    const probe = (async () => {
+      const probed = await this.probeAlpn(target);
+      // A failed probe is not evidence about the origin's protocols — it is
+      // usually the origin being unreachable. Caching it would let one bad moment
+      // pin the origin, so we don't, and the HTTP/1.1 attempt that follows fails
+      // exactly as it does today.
+      if (probed === null) return 'http/1.1';
+      this.rememberAlpn(key, probed);
+      return probed;
+    })();
+
+    this.alpnInFlight.set(key, probe);
+    // The verdict is cached *inside* the promise, before it settles, so anyone
+    // arriving after this cleanup reads the cache instead. `then(fn, fn)` rather
+    // than `finally`: the promise `finally` returns would reject on its own and
+    // become the unhandled rejection this module exists to avoid.
+    const forget = () => {
+      if (this.alpnInFlight.get(key) === probe) this.alpnInFlight.delete(key);
+    };
+    probe.then(forget, forget);
+    return probe;
   }
 
   private rememberAlpn(key: string, protocol: NegotiatedProtocol): void {
@@ -753,7 +789,20 @@ export class UpstreamTransport {
       }
       this.dropSession(key, pooled.session, false);
     }
-    return { entry: await this.connectSession(key, target), reused: false };
+
+    // One handshake per cold origin, shared by everyone who wants it. `reused`
+    // stays false for all of them, which is the honest answer: a brand-new
+    // session that fails is not the stale-corpse case the retry exists for.
+    const running = this.sessionInFlight.get(key);
+    if (running) return { entry: await running, reused: false };
+
+    const connecting = this.connectSession(key, target);
+    this.sessionInFlight.set(key, connecting);
+    const forget = () => {
+      if (this.sessionInFlight.get(key) === connecting) this.sessionInFlight.delete(key);
+    };
+    connecting.then(forget, forget);
+    return { entry: await connecting, reused: false };
   }
 
   private connectSession(key: string, target: UpstreamTarget): Promise<PooledSession> {
@@ -822,6 +871,20 @@ export class UpstreamTransport {
         }
         const entry: PooledSession = { session, active: 0, draining: false };
         this.evictIfFull();
+        // Whatever is being displaced has to be closed on the way out. `set`
+        // alone drops the previous entry's only reference, putting a live session
+        // beyond the reach of the map `close()` iterates — a leak that keeps
+        // origin sockets open and hangs `Http2Server.close()` in a consumer's
+        // test harness. Graceful, because a displaced session may still have
+        // streams in flight and they are entitled to finish; the same choice
+        // `evictIfFull` makes. The in-flight map above should make this
+        // unreachable for concurrent cold starts, which is exactly why it is
+        // handled rather than assumed away.
+        const displaced = this.sessions.get(key);
+        if (displaced && displaced.session !== session) {
+          this.sessions.delete(key);
+          if (!displaced.session.destroyed) displaced.session.close();
+        }
         this.sessions.set(key, entry);
         if (this.closed) {
           // `close()` raced this handshake; do not leave a live session behind.

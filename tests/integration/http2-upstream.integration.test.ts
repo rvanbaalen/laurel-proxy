@@ -466,6 +466,85 @@ describe('upstream protocol selection', () => {
   }, 20_000);
 });
 
+// ---- cold-start bursts -----------------------------------------------------
+
+/**
+ * A burst against a cold origin is the shape that matters most — a browser page
+ * load is exactly this — and it is where the pooling that justifies this
+ * transport's complexity either engages or doesn't. Both the probe and the
+ * connect are read-then-await, so without an in-flight map N concurrent requests
+ * each probe *and* each connect: measured at 20 TCP connections and 10 h2
+ * sessions for 10 requests, with `stats()` reporting one of each because every
+ * `sessions.set` silently replaced the last — putting nine sessions beyond the
+ * reach of the map `close()` iterates.
+ */
+describe('upstream h2 cold-start burst', () => {
+  const BURST = 10;
+
+  function burstServer(): { server: http2.Http2SecureServer; connections: () => number } {
+    let connections = 0;
+    const server = h2Server((stream) => {
+      stream.respond({ ':status': 200, 'content-length': '2' });
+      stream.end('ok');
+    });
+    // Raw TCP connections, which is what a per-request probe or a per-request
+    // session actually costs. `secureConnection` would miss an abandoned probe.
+    server.on('connection', () => {
+      connections += 1;
+    });
+    return { server, connections: () => connections };
+  }
+
+  it('shares one ALPN probe and one session across concurrent requests to a cold origin', async () => {
+    const { server, connections } = burstServer();
+    const port = await listen(server);
+    const transport = new UpstreamTransport();
+    try {
+      const responses = await Promise.all(
+        Array.from({ length: BURST }, () => transport.request(get(port, '/burst'))),
+      );
+      const bodies = await Promise.all(responses.map((res) => drain(res)));
+
+      expect(responses.map((r) => r.protocol)).toEqual(Array(BURST).fill('h2'));
+      expect(bodies.map((b) => b.text)).toEqual(Array(BURST).fill('ok'));
+      // One probe, one session — not one of each per request.
+      expect(connections()).toBe(2);
+      expect(serverSessions.get(server)!.size).toBe(1);
+      expect(transport.stats()).toEqual({ alpnEntries: 1, sessions: 1 });
+    } finally {
+      transport.close();
+      await closeServer(server);
+    }
+  }, 20_000);
+
+  it('leaves no origin-side session alive after close(), even after a burst', async () => {
+    const { server } = burstServer();
+    const port = await listen(server);
+    const transport = new UpstreamTransport();
+    const alive = serverSessions.get(server)!;
+    try {
+      const responses = await Promise.all(
+        Array.from({ length: BURST }, () => transport.request(get(port, '/burst'))),
+      );
+      await Promise.all(responses.map((res) => drain(res)));
+      expect(alive.size).toBeGreaterThan(0);
+
+      transport.close();
+      // Every session the transport opened must be reachable from the map
+      // `close()` iterates; one it displaced without closing is a leak that also
+      // hangs `Http2Server.close()` in a consumer's test harness.
+      for (let i = 0; i < 50 && alive.size > 0; i++) {
+        await new Promise((r) => setTimeout(r, 20));
+      }
+      expect(alive.size).toBe(0);
+      expect(transport.stats().sessions).toBe(0);
+    } finally {
+      transport.close();
+      await closeServer(server);
+    }
+  }, 20_000);
+});
+
 // ---- truncation ------------------------------------------------------------
 
 describe('upstream h2 truncation is never reported as success', () => {

@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import http2 from 'node:http2';
+import { EventEmitter } from 'node:events';
 import { PassThrough } from 'node:stream';
 import type { Readable } from 'node:stream';
 import { countingBody, fromH2ResponseHeaders, toH2RequestHeaders, UpstreamTransport } from './upstream.js';
@@ -122,6 +123,69 @@ describe('UpstreamTransport', () => {
     const t = new UpstreamTransport();
     t.close();
     expect(() => t.close()).not.toThrow();
+  });
+
+  /**
+   * A session that gets displaced in the pool must be closed on the way out.
+   *
+   * The in-flight map in `acquireSession` should make displacement unreachable for
+   * the case that used to cause it (concurrent cold starts — see the burst tests
+   * in `tests/integration/http2-upstream.integration.test.ts`), so this drives
+   * `connectSession` directly through the `connect` seam. That is the point: a
+   * defensive branch nothing can currently reach is exactly the kind that rots,
+   * and the failure it guards against is a live session with no reference left in
+   * the map `close()` iterates — an origin socket that leaks, and an
+   * `Http2Server.close()` that never calls back.
+   */
+  it('closes a pooled session it displaces instead of losing the reference', async () => {
+    const sessions: Array<{ closeCalls: number; destroyCalls: number }> = [];
+    const connect = () => {
+      const session = new EventEmitter() as unknown as http2.ClientHttp2Session;
+      const counters = { closeCalls: 0, destroyCalls: 0 };
+      sessions.push(counters);
+      Object.assign(session, {
+        alpnProtocol: 'h2',
+        closed: false,
+        destroyed: false,
+        close: () => {
+          counters.closeCalls += 1;
+          Object.assign(session, { closed: true });
+        },
+        destroy: () => {
+          counters.destroyCalls += 1;
+          Object.assign(session, { destroyed: true });
+        },
+        ref: () => session,
+        unref: () => session,
+        setTimeout: () => session,
+      });
+      setImmediate(() => session.emit('connect'));
+      return session;
+    };
+
+    const transport = new UpstreamTransport({ connect });
+    // `connectSession` is private, and deliberately so — this reaches past that
+    // rather than widening the class's surface for one defensive test.
+    const connectSession = (
+      transport as unknown as {
+        connectSession(key: string, target: UpstreamTarget): Promise<unknown>;
+      }
+    ).connectSession.bind(transport);
+
+    try {
+      await connectSession('example.com:443', target);
+      await connectSession('example.com:443', target);
+      expect(sessions).toHaveLength(2);
+      // The first session is gone gracefully, not leaked.
+      expect(sessions[0].closeCalls).toBe(1);
+      expect(sessions[1].closeCalls).toBe(0);
+      expect(transport.stats().sessions).toBe(1);
+      transport.close();
+      // And the survivor is the one `close()` can still reach.
+      expect(sessions[1].destroyCalls).toBe(1);
+    } finally {
+      transport.close();
+    }
   });
 });
 
