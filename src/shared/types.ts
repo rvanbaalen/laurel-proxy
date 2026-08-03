@@ -17,9 +17,39 @@ export interface RequestRecord {
   content_type: string | null;
   truncated: number;
   kind?: RequestKind;
+  /**
+   * The wire protocol negotiated with the **client** — independent of
+   * {@link RequestRecord.protocol}, which is the URL scheme, not a wire
+   * protocol, and unrelated to what the origin spoke (see `origin_protocol`).
+   * An h2 client in front of an HTTP/1.1-only origin is a normal case, not an
+   * edge case, which is why the two hops each get their own field.
+   *
+   * `null`/absent means genuinely unknown, e.g. a row captured before this
+   * field existed. Every current record site sets this explicitly to a real
+   * value, so a null here is a signal, not a default — display code must
+   * render it as "unknown", never silently as `'http/1.1'`. See the migration
+   * note in `src/storage/db.ts` for why historical rows get a real value
+   * instead of null.
+   */
+  client_protocol?: WireProtocol | null;
+  /**
+   * The wire protocol negotiated with the **origin** for this exchange. See
+   * `client_protocol` for why this is a separate field rather than reusing
+   * `protocol`, and why `null`/absent means unknown rather than a guess.
+   */
+  origin_protocol?: WireProtocol | null;
 }
 
 export type RequestKind = 'http' | 'websocket';
+
+/**
+ * The wire protocol actually spoken on one hop of an exchange, as distinct
+ * from {@link RequestRecord.protocol} (the URL scheme). Named to match
+ * `NegotiatedProtocol` in `src/server/upstream.ts` — kept as a separate
+ * declaration here rather than imported, since this file is shared with
+ * browser code and that one pulls in `node:http2` types.
+ */
+export type WireProtocol = 'http/1.1' | 'h2';
 
 export type WsOpcode = 'text' | 'binary' | 'ping' | 'pong' | 'close';
 
@@ -98,6 +128,15 @@ export interface RequestFilter {
    * visible unfiltered and invisible filtered, which is worse than either answer.
    */
   kind?: RequestKind;
+  /**
+   * Exact match against `client_protocol`/`origin_protocol`. Unlike `kind`,
+   * a `null` column value never matches either filter value: nothing in this
+   * codebase legitimately produces a `null` protocol going forward (every
+   * record site sets one), so a `null` row is an anomaly, not a case that
+   * deserves to be folded into a known value the way a pre-`kind` row is.
+   */
+  clientProtocol?: WireProtocol;
+  originProtocol?: WireProtocol;
   status?: number;
   statusMin?: number;
   statusMax?: number;

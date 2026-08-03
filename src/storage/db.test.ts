@@ -271,6 +271,127 @@ describe('Database', () => {
     expect((db.getById('plain') as { kind?: string }).kind).toBe('http');
   });
 
+  it('stores client_protocol and origin_protocol as null for a record that omits them, rather than guessing http/1.1', () => {
+    // The dominant defect class this project watches for: an unknown value
+    // must never be stored — or later displayed — as a definite one. A
+    // caller that forgot to set the wire protocol is exactly that case, and
+    // it must read back as null, not as a plausible-looking 'http/1.1'.
+    db.insert({ ...baseRecord(), id: 'no-protocol' });
+    const row = db.getById('no-protocol') as RequestRecord;
+    expect(row.client_protocol).toBeNull();
+    expect(row.origin_protocol).toBeNull();
+  });
+
+  it('round-trips explicit client_protocol and origin_protocol, independently of each other', () => {
+    db.insert({ ...baseRecord(), id: 'mixed-hops', client_protocol: 'h2', origin_protocol: 'http/1.1' });
+    const row = db.getById('mixed-hops') as RequestRecord;
+    expect(row.client_protocol).toBe('h2');
+    expect(row.origin_protocol).toBe('http/1.1');
+  });
+
+  it('queries with a clientProtocol filter', () => {
+    db.insert(makeRequest({ host: 'h2-client.example.com', client_protocol: 'h2', origin_protocol: 'h2' }));
+    db.insert(makeRequest({ host: 'h1-client.example.com', client_protocol: 'http/1.1', origin_protocol: 'http/1.1' }));
+
+    const h2 = db.query({ clientProtocol: 'h2' });
+    expect(h2.total).toBe(1);
+    expect(h2.data[0].host).toBe('h2-client.example.com');
+
+    const h1 = db.query({ clientProtocol: 'http/1.1' });
+    expect(h1.total).toBe(1);
+    expect(h1.data[0].host).toBe('h1-client.example.com');
+  });
+
+  it('queries with an originProtocol filter, independently of clientProtocol', () => {
+    // The flagship case this whole feature exists for: an h2 client in front
+    // of an HTTP/1.1-only origin. The two filters must be able to find it
+    // from either side.
+    db.insert(makeRequest({ host: 'mixed.example.com', client_protocol: 'h2', origin_protocol: 'http/1.1' }));
+    db.insert(makeRequest({ host: 'both-h2.example.com', client_protocol: 'h2', origin_protocol: 'h2' }));
+
+    const mixedByOrigin = db.query({ clientProtocol: 'h2', originProtocol: 'http/1.1' });
+    expect(mixedByOrigin.total).toBe(1);
+    expect(mixedByOrigin.data[0].host).toBe('mixed.example.com');
+
+    const bothH2 = db.query({ clientProtocol: 'h2', originProtocol: 'h2' });
+    expect(bothH2.total).toBe(1);
+    expect(bothH2.data[0].host).toBe('both-h2.example.com');
+  });
+
+  it('excludes a null client_protocol/origin_protocol from both filter values, unlike kind', () => {
+    // Deliberately different from `kind`'s NULL handling: a NULL kind is
+    // folded into 'http' because every row genuinely was 'http' before the
+    // column existed. A NULL protocol has no such guarantee behind it (see
+    // `bindRecord`), so it must not silently satisfy an 'http/1.1' filter —
+    // that would be the exact "unknown reported as known" failure this
+    // project singles out.
+    const raw = new BetterSqlite3(dbPath);
+    raw.prepare(
+      `INSERT INTO requests (id, timestamp, method, url, host, path, protocol, client_protocol, origin_protocol)
+       VALUES ('null-protocol', 1, 'GET', 'http://n/x', 'n', '/x', 'http', NULL, NULL)`,
+    ).run();
+    raw.close();
+
+    expect(db.query({ clientProtocol: 'http/1.1' }).data.map((r) => r.id)).not.toContain('null-protocol');
+    expect(db.query({ clientProtocol: 'h2' }).data.map((r) => r.id)).not.toContain('null-protocol');
+  });
+
+  it('migrates a database created without the client_protocol/origin_protocol columns, backfilling http/1.1', () => {
+    // Built from a schema that already has `kind` (that migration shipped
+    // earlier) but predates HTTP/2 support entirely — the realistic shape of
+    // an existing user's database right before this feature landed.
+    const legacyPath = path.join(os.tmpdir(), `laurel-proxy-legacy-protocol-${randomUUID()}.db`);
+    try {
+      const legacy = new BetterSqlite3(legacyPath);
+      legacy.exec(`
+        CREATE TABLE requests (
+          id TEXT PRIMARY KEY, timestamp INTEGER NOT NULL, method TEXT NOT NULL,
+          url TEXT NOT NULL, host TEXT NOT NULL, path TEXT NOT NULL, protocol TEXT NOT NULL,
+          request_headers TEXT, request_body BLOB, request_size INTEGER, status INTEGER,
+          response_headers TEXT, response_body BLOB, response_size INTEGER,
+          duration INTEGER, content_type TEXT, truncated INTEGER DEFAULT 0,
+          kind TEXT DEFAULT 'http'
+        );
+      `);
+      legacy.prepare(
+        `INSERT INTO requests (id, timestamp, method, url, host, path, protocol)
+         VALUES ('pre-h2', 1, 'GET', 'http://x/', 'x', '/', 'http')`,
+      ).run();
+      legacy.close();
+
+      const migrated = new Database(legacyPath);
+      try {
+        // A row captured before HTTP/2 existed really did speak HTTP/1.1 on
+        // both hops — this backfill states a fact, not a guess.
+        const row = migrated.getById('pre-h2') as RequestRecord;
+        expect(row.client_protocol).toBe('http/1.1');
+        expect(row.origin_protocol).toBe('http/1.1');
+
+        migrated.insert({ ...baseRecord(), id: 'post-h2', client_protocol: 'h2', origin_protocol: 'http/1.1' });
+        const newRow = migrated.getById('post-h2') as RequestRecord;
+        expect(newRow.client_protocol).toBe('h2');
+        expect(newRow.origin_protocol).toBe('http/1.1');
+      } finally {
+        migrated.close();
+      }
+
+      // Re-opening an already-migrated database must never throw (e.g. from
+      // a duplicate `ALTER TABLE ADD COLUMN`) — the constructor runs on every
+      // CLI invocation.
+      const reopened = new Database(legacyPath);
+      try {
+        expect((reopened.getById('pre-h2') as RequestRecord).client_protocol).toBe('http/1.1');
+        expect((reopened.getById('post-h2') as RequestRecord).origin_protocol).toBe('http/1.1');
+      } finally {
+        reopened.close();
+      }
+    } finally {
+      try { fs.unlinkSync(legacyPath); } catch {}
+      try { fs.unlinkSync(legacyPath + '-wal'); } catch {}
+      try { fs.unlinkSync(legacyPath + '-shm'); } catch {}
+    }
+  });
+
   it('migrates a database created without the kind column', () => {
     const legacyPath = path.join(os.tmpdir(), `laurel-proxy-legacy-${randomUUID()}.db`);
     try {

@@ -47,7 +47,9 @@ export class Database {
         duration INTEGER,
         content_type TEXT,
         truncated INTEGER DEFAULT 0,
-        kind TEXT DEFAULT 'http'
+        kind TEXT DEFAULT 'http',
+        client_protocol TEXT,
+        origin_protocol TEXT
       );
       CREATE INDEX IF NOT EXISTS idx_timestamp ON requests(timestamp);
       CREATE INDEX IF NOT EXISTS idx_host ON requests(host);
@@ -82,11 +84,41 @@ export class Database {
     if (!columns.some((c) => c.name === 'kind')) {
       this.db.exec(`ALTER TABLE requests ADD COLUMN kind TEXT DEFAULT 'http'`);
     }
+    // Both hops predate this pair of columns by construction: before HTTP/2
+    // support existed, every exchange this proxy ever recorded spoke
+    // HTTP/1.1 on both the client and origin hops, full stop. So — unlike a
+    // brand-new record that omits these fields, which means genuinely unknown
+    // (see `bindRecord`) — backfilling every pre-existing row with
+    // `'http/1.1'` is not a guess, it's the only value that could ever have
+    // been true for a row written before this column existed.
+    if (!columns.some((c) => c.name === 'client_protocol')) {
+      this.db.exec(`ALTER TABLE requests ADD COLUMN client_protocol TEXT DEFAULT 'http/1.1'`);
+    }
+    if (!columns.some((c) => c.name === 'origin_protocol')) {
+      this.db.exec(`ALTER TABLE requests ADD COLUMN origin_protocol TEXT DEFAULT 'http/1.1'`);
+    }
   }
 
-  /** Normalizes optional fields before binding so named-parameter statements never see a missing key. */
+  /**
+   * Normalizes optional fields before binding so named-parameter statements
+   * never see a missing key.
+   *
+   * `client_protocol`/`origin_protocol` default to `null`, not `'http/1.1'`:
+   * unlike `kind`, whose pre-feature history really was uniformly `'http'`
+   * (see `migrate`), a *newly constructed* record that omits a wire protocol
+   * has no such guarantee behind it — every current call site sets both
+   * explicitly, so a caller that didn't is exactly the "unknown reported as a
+   * definite value" failure this project singles out. Storing `null` keeps
+   * that failure visible instead of papering over it with a plausible-looking
+   * default.
+   */
   private bindRecord(record: RequestRecord): Record<string, unknown> {
-    return { ...record, kind: record.kind ?? 'http' };
+    return {
+      ...record,
+      kind: record.kind ?? 'http',
+      client_protocol: record.client_protocol ?? null,
+      origin_protocol: record.origin_protocol ?? null,
+    };
   }
 
   insert(record: RequestRecord): void {
@@ -95,12 +127,12 @@ export class Database {
         id, timestamp, method, url, host, path, protocol,
         request_headers, request_body, request_size,
         status, response_headers, response_body, response_size,
-        duration, content_type, truncated, kind
+        duration, content_type, truncated, kind, client_protocol, origin_protocol
       ) VALUES (
         @id, @timestamp, @method, @url, @host, @path, @protocol,
         @request_headers, @request_body, @request_size,
         @status, @response_headers, @response_body, @response_size,
-        @duration, @content_type, @truncated, @kind
+        @duration, @content_type, @truncated, @kind, @client_protocol, @origin_protocol
       )
     `);
     stmt.run(this.bindRecord(record));
@@ -112,12 +144,12 @@ export class Database {
         id, timestamp, method, url, host, path, protocol,
         request_headers, request_body, request_size,
         status, response_headers, response_body, response_size,
-        duration, content_type, truncated, kind
+        duration, content_type, truncated, kind, client_protocol, origin_protocol
       ) VALUES (
         @id, @timestamp, @method, @url, @host, @path, @protocol,
         @request_headers, @request_body, @request_size,
         @status, @response_headers, @response_body, @response_size,
-        @duration, @content_type, @truncated, @kind
+        @duration, @content_type, @truncated, @kind, @client_protocol, @origin_protocol
       )
     `);
     const insertMany = this.db.transaction((records: RequestRecord[]) => {
@@ -193,6 +225,16 @@ export class Database {
         conditions.push('kind = @kind');
         params.kind = filter.kind;
       }
+    }
+    if (filter.clientProtocol) {
+      // Exact match, no NULL-inclusion special case: see the note on
+      // `RequestFilter.clientProtocol`.
+      conditions.push('client_protocol = @clientProtocol');
+      params.clientProtocol = filter.clientProtocol;
+    }
+    if (filter.originProtocol) {
+      conditions.push('origin_protocol = @originProtocol');
+      params.originProtocol = filter.originProtocol;
     }
     if (filter.status !== undefined) {
       conditions.push('status = @status');
