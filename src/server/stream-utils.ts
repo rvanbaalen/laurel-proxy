@@ -9,14 +9,43 @@
  * `@types/node` declaring it (the class is typed as extending `stream.Writable`;
  * the compatibility object only forwards some of that surface, and `destroyed`
  * lives on `res.stream`). Measured, not read from the docs. So `undefined` here
- * means "unknown", never "not destroyed" — which is why the check below is a
- * fast path and the `close`/`error` listeners, not the check, are what guarantee
- * this settles.
+ * means "unknown", never "not destroyed", and {@link isGone} — not this property
+ * — is what callers should ask. The `close`/`error` listeners below remain the
+ * guarantee that a drain wait settles; the check is only a fast path.
  */
 export interface DrainableStream {
   destroyed: boolean | undefined;
+  /**
+   * The HTTP/2 stream behind an `Http2ServerResponse`, absent on every HTTP/1.1
+   * shape. It is where the truth about `destroyed` actually lives for h2, so
+   * naming it here is what lets {@link isGone} answer the question for both
+   * protocols instead of only one — see the `destroyed` note above.
+   */
+  readonly stream?: { readonly destroyed: boolean } | undefined;
   on(event: 'drain' | 'close' | 'error', listener: () => void): unknown;
   off(event: 'drain' | 'close' | 'error', listener: () => void): unknown;
+}
+
+/**
+ * Whether this stream is definitely finished with.
+ *
+ * The fall-through is the point. `destroyed === undefined` means *unknown*, which
+ * for an `Http2ServerResponse` is the only value it ever has, so the question has
+ * to be put to `res.stream`, where Node keeps the answer. `?? false` at the end is
+ * reached only when neither source knows, and "not known to be gone" is the answer
+ * that keeps a caller from bailing out of a healthy transfer.
+ *
+ * `??` rather than `||` for meaning rather than for behaviour: no shape in this
+ * codebase reports `destroyed === false` while carrying a destroyed `stream`, so
+ * the two operators agree on every input that actually occurs, and no test can
+ * distinguish them. `??` is nonetheless what is meant — consult the second source
+ * because the first *does not know*, not because it said no.
+ *
+ * Nothing about the HTTP/1.1 case changes: `destroyed` is a real boolean there,
+ * so the first term always decides and `stream` is not even present.
+ */
+export function isGone(stream: DrainableStream): boolean {
+  return stream.destroyed ?? stream.stream?.destroyed ?? false;
 }
 
 /**
@@ -28,7 +57,7 @@ export interface DrainableStream {
  */
 export function waitForDrain(stream: DrainableStream): Promise<void> {
   return new Promise((resolve, reject) => {
-    if (stream.destroyed) {
+    if (isGone(stream)) {
       reject(new Error('stream closed'));
       return;
     }
