@@ -144,6 +144,20 @@ export function createApiRouter(
       }
       filter.kind = req.query.kind;
     }
+    if (req.query.client_protocol !== undefined) {
+      if (req.query.client_protocol !== 'http/1.1' && req.query.client_protocol !== 'h2') {
+        res.status(400).json({ error: 'client_protocol must be "http/1.1" or "h2"' });
+        return;
+      }
+      filter.clientProtocol = req.query.client_protocol;
+    }
+    if (req.query.origin_protocol !== undefined) {
+      if (req.query.origin_protocol !== 'http/1.1' && req.query.origin_protocol !== 'h2') {
+        res.status(400).json({ error: 'origin_protocol must be "http/1.1" or "h2"' });
+        return;
+      }
+      filter.originProtocol = req.query.origin_protocol;
+    }
     if (req.query.status) filter.status = parseInt(req.query.status as string, 10);
     if (req.query.method) filter.method = req.query.method as string;
     if (req.query.content_type) filter.content_type = req.query.content_type as string;

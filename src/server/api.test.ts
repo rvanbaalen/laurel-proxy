@@ -212,6 +212,38 @@ describe('REST API', () => {
     expect(JSON.parse(res.body).error).toMatch(/kind/i);
   });
 
+  it('GET /api/requests filters by client_protocol and origin_protocol independently', async () => {
+    db.insert(makeRequest({
+      host: 'mixed-hops.example.com', client_protocol: 'h2', origin_protocol: 'http/1.1',
+    }));
+    db.insert(makeRequest({
+      host: 'both-h1.example.com', client_protocol: 'http/1.1', origin_protocol: 'http/1.1',
+    }));
+
+    const h2Clients = JSON.parse((await httpReq(port, '/api/requests?client_protocol=h2')).body);
+    expect(h2Clients.total).toBe(1);
+    expect(h2Clients.data[0].host).toBe('mixed-hops.example.com');
+
+    // The flagship case: found by asking for the origin hop specifically,
+    // which a plain `protocol` (URL scheme) field could never distinguish.
+    const mixed = JSON.parse(
+      (await httpReq(port, '/api/requests?client_protocol=h2&origin_protocol=http%2F1.1')).body,
+    );
+    expect(mixed.total).toBe(1);
+    expect(mixed.data[0].host).toBe('mixed-hops.example.com');
+  });
+
+  it('GET /api/requests rejects an unrecognised client_protocol or origin_protocol', async () => {
+    db.insert(makeRequest());
+    const badClient = await httpReq(port, '/api/requests?client_protocol=h3');
+    expect(badClient.status).toBe(400);
+    expect(JSON.parse(badClient.body).error).toMatch(/client_protocol/i);
+
+    const badOrigin = await httpReq(port, '/api/requests?origin_protocol=h3');
+    expect(badOrigin.status).toBe(400);
+    expect(JSON.parse(badOrigin.body).error).toMatch(/origin_protocol/i);
+  });
+
   it('GET /api/requests/:id returns single request', async () => {
     const req = makeRequest();
     db.insert(req);
