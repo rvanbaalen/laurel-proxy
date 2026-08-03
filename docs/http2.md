@@ -12,9 +12,12 @@ is a normal case, not a special one, and the recording says so.
   extension at all (`alpnProtocol === false`) lands on HTTP/1.1 — never
   treated as h2, never a crash.
 - **Origin hop.** Negotiated separately via its own ALPN probe, cached per
-  `host:port` so repeat requests to the same origin don't re-probe. A dead
-  pooled session is discarded and retried once on a fresh one; it does not
-  fail the request that discovered it.
+  `host:port` so repeat requests to the same origin don't re-probe.
+  Concurrent requests to a *cold* origin share one probe and one handshake
+  rather than each starting their own — a page load against a single host is
+  one probe plus one h2 session, not one of each per request. A dead pooled
+  session is discarded and retried once on a fresh one; it does not fail the
+  request that discovered it.
 
 The two are independent by design: nothing about the client's protocol
 influences what's offered to the origin, or vice versa.
