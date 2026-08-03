@@ -1,11 +1,11 @@
-import http from 'node:http';
-import https from 'node:https';
+import type http from 'node:http';
 import { randomUUID } from 'node:crypto';
 import { URL } from 'node:url';
 import { waitForDrain } from './stream-utils.js';
 import type { DrainableStream } from './stream-utils.js';
 import { recordSafely } from '../shared/never-fatal.js';
-import type { NegotiatedProtocol } from './upstream.js';
+import { UpstreamTransport } from './upstream.js';
+import type { NegotiatedProtocol, UpstreamResponse } from './upstream.js';
 import type { Config, RequestRecord } from '../shared/types.js';
 import type { Throttler } from './throttle.js';
 
@@ -66,10 +66,46 @@ export interface ExchangeResponse extends DrainableStream {
   destroy(error?: Error): unknown;
 }
 
+/**
+ * The one method the pipeline needs from `UpstreamTransport`.
+ *
+ * Narrow deliberately: a pooled session and an ALPN cache have a lifecycle, and
+ * it belongs to whoever created the transport (`ProxyServer`, which closes it in
+ * `stop()`). Handing the exchange the whole class would let a future edit call
+ * `close()` from inside a single exchange and tear the pool out from under every
+ * other one. It also keeps the dependency stubbable — the class has private
+ * fields, so a test double could not satisfy the class type.
+ */
+export type UpstreamRequester = Pick<UpstreamTransport, 'request'>;
+
 export interface ExchangeDeps {
   config: Config;
   onRecord: (record: RequestRecord) => void;
   throttle?: Throttler;
+  /**
+   * Upstream transport, owned and closed by the caller. Optional so that
+   * `handleExchange` stays callable with just a config and a sink; see
+   * {@link sharedUpstream} for what an omitted one falls back to.
+   */
+  upstream?: UpstreamRequester;
+}
+
+let fallbackTransport: UpstreamTransport | null = null;
+
+/**
+ * The transport used when `deps.upstream` is omitted.
+ *
+ * `ProxyServer` always supplies its own and closes it in `stop()`. This exists
+ * for the callers that have no lifecycle to hang one on, so that they neither
+ * have to fake one nor pay for a fresh ALPN probe and a fresh session pool on
+ * every request. Nothing closes it, which is safe rather than sloppy: it holds
+ * nothing at all until an origin negotiates h2, and every pooled session is
+ * `unref`'d and idles itself out, so it can neither keep a process alive nor
+ * grow without bound.
+ */
+function sharedUpstream(): UpstreamTransport {
+  fallbackTransport ??= new UpstreamTransport();
+  return fallbackTransport;
 }
 
 /** Hop-by-hop headers that must not be forwarded upstream. */
@@ -120,8 +156,8 @@ export function resolveMitmTarget(hostname: string, port: number, rawPath: strin
  * A clamp rather than `|| 500`: `||` only rescues `0`, and every other
  * unsendable value the parser can produce (`HTTP/1.1 042` → `42`) would still
  * throw. This substitutes a status only for what cannot be sent, and only on the
- * wire — the record keeps `proxyRes.statusCode` as upstream stated it, so a
- * capture of a malformed response stays an accurate capture.
+ * wire — the record keeps the upstream response's own `status` as upstream stated
+ * it, so a capture of a malformed response stays an accurate capture.
  */
 export function sendableStatus(statusCode: number | undefined): number {
   if (statusCode === undefined || !Number.isInteger(statusCode)) return 500;
@@ -252,23 +288,18 @@ export async function handleExchange(
     await deps.throttle?.up.consume(requestBody.length);
   }
 
-  const transport = target.protocol === 'https' ? https : http;
-  const options: https.RequestOptions = {
-    hostname: target.hostname,
-    port: target.port,
-    path: target.path,
-    method: clientReq.method,
-    headers: upstreamHeaders,
-    ...(target.protocol === 'https' ? { rejectUnauthorized: false } : {}),
-  };
-
-  let proxyRes: http.IncomingMessage;
+  let proxyRes: UpstreamResponse;
   try {
-    proxyRes = await new Promise<http.IncomingMessage>((resolve, reject) => {
-      const req = transport.request(options, resolve);
-      req.on('error', reject);
-      if (requestBody.length > 0) req.write(requestBody);
-      req.end();
+    // Which wire protocol this speaks is the transport's business, not the
+    // pipeline's: it negotiates h2 or HTTP/1.1 with the origin via ALPN and
+    // returns one shape either way.
+    proxyRes = await (deps.upstream ?? sharedUpstream()).request({
+      target,
+      // Node's HTTP client defaults an absent method to GET, so spelling that
+      // default here keeps the behaviour while satisfying a required field.
+      method: clientReq.method ?? 'GET',
+      headers: upstreamHeaders,
+      body: requestBody,
     });
   } catch {
     if (!clientRes.headersSent) {
@@ -285,15 +316,15 @@ export async function handleExchange(
 
   // The status on the wire is coerced to what a response writer will accept; the
   // record below keeps what upstream actually said. See `sendableStatus`.
-  clientRes.writeHead(sendableStatus(proxyRes.statusCode), relayResponseHeaders(proxyRes.headers));
+  clientRes.writeHead(sendableStatus(proxyRes.status), relayResponseHeaders(proxyRes.headers));
 
   const captured: Buffer[] = [];
   let capturedLength = 0;
   let responseSize = 0;
 
-  let streamFailed = false;
+  let relayFailed = false;
   try {
-    for await (const chunk of proxyRes as AsyncIterable<Buffer>) {
+    for await (const chunk of proxyRes.body as AsyncIterable<Buffer>) {
       // Guarded because this `try`'s catch destroys the client response: without
       // it, a failure in the capture bookkeeping would abort a transfer that is
       // otherwise proceeding perfectly.
@@ -311,13 +342,23 @@ export async function handleExchange(
     clientRes.end();
   } catch {
     clientRes.destroy();
-    streamFailed = true;
+    relayFailed = true;
   }
 
-  // A response that failed or was aborted mid-transfer must not be recorded
-  // as if it completed — a partial body with status 200 would be actively
+  // A response that failed or was aborted mid-transfer must not be recorded as
+  // if it completed — a partial body with status 200 would be actively
   // misleading for the network failures this proxy exists to diagnose.
-  if (streamFailed) return;
+  //
+  // Two independent signals, and both are consulted because neither implies the
+  // other. `bodyStatus()` is the transport's own verdict on the response, and it
+  // catches endings a `for await` cannot see: HTTP/2 hands a body that stops
+  // early to its consumer as a *clean* end (see `upstream.ts`), so the loop above
+  // can finish normally on a body that was cut short. `relayFailed` covers the
+  // converse — the body arrived in full but writing it to the client threw — where
+  // the transport is entitled to say `complete` and the client still got a partial
+  // response. Recording only when nothing objected keeps this the strict superset
+  // of the previous `streamFailed` check that a no-behaviour-change refactor needs.
+  if (relayFailed || proxyRes.bodyStatus().state !== 'complete') return;
 
   // Everything the record is made of is built inside the guard, not passed into
   // it. `handleExchange` is dispatched as `void handleExchange(...)`, so its
@@ -343,7 +384,7 @@ export async function handleExchange(
       request_body:
         requestBody.length > 0 ? requestBody.subarray(0, config.maxBodySize) : null,
       request_size: requestBody.length,
-      status: proxyRes.statusCode ?? 0,
+      status: proxyRes.status ?? 0,
       response_headers: JSON.stringify(proxyRes.headers),
       response_body: responseBody.length > 0 ? responseBody : null,
       response_size: responseSize,

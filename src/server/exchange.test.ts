@@ -1,6 +1,7 @@
 import { describe, it, expect, vi } from 'vitest';
 import http from 'node:http';
 import http2 from 'node:http2';
+import { Readable } from 'node:stream';
 import type net from 'node:net';
 import {
   handleExchange,
@@ -9,7 +10,8 @@ import {
   resolveMitmTarget,
   sendableStatus,
 } from './exchange.js';
-import type { ExchangeRequest, ExchangeResponse } from './exchange.js';
+import type { ExchangeRequest, ExchangeResponse, UpstreamRequester } from './exchange.js';
+import type { BodyStatus, UpstreamResponse } from './upstream.js';
 import { DEFAULT_CONFIG } from '../shared/types.js';
 import type { Config, RequestRecord } from '../shared/types.js';
 import { watchProcessErrors } from '../../tests/helpers/process-errors.js';
@@ -361,6 +363,106 @@ describe('handleExchange recording failures', () => {
     expect(complete).toBe(true);
     expect(escaped).toEqual([]);
     // Losing the row is the acceptable half of the trade.
+    expect(onRecord).not.toHaveBeenCalled();
+  });
+});
+
+/**
+ * A transport whose response body ends cleanly while its own verdict on that
+ * body is whatever the test says.
+ *
+ * That combination is not contrived: it is precisely what HTTP/2 produces. When a
+ * session or socket dies mid-body, Node's h2 client pushes `null` and the
+ * readable *ends* — measured on Node 22.21.1 and documented in `upstream.ts` — so
+ * `bodyStatus()` is the only thing standing between a seven-byte fragment of an
+ * eight-megabyte response and a row that claims it was a complete 200.
+ */
+function stubUpstream(body: string, bodyStatus: BodyStatus): UpstreamRequester {
+  return {
+    request: async (): Promise<UpstreamResponse> => ({
+      protocol: 'http/1.1',
+      status: 200,
+      headers: { 'content-type': 'text/plain' },
+      body: Readable.from([Buffer.from(body)]),
+      trailers: () => ({}),
+      bodyStatus: () => bodyStatus,
+    }),
+  };
+}
+
+/** Drives one GET through `handleExchange` against an injected transport. */
+async function runWithUpstream(
+  upstream: UpstreamRequester,
+  onRecord: (record: RequestRecord) => void,
+): Promise<{ status: number; body: string; complete: boolean }> {
+  const proxy = http.createServer((clientReq, clientRes) => {
+    const target = resolveHttpTarget(`http://127.0.0.1:1${clientReq.url}`);
+    if (!target) {
+      clientRes.writeHead(400);
+      clientRes.end();
+      return;
+    }
+    void handleExchange(clientReq, clientRes, target, {
+      config: DEFAULT_CONFIG,
+      onRecord,
+      upstream,
+    });
+  });
+  await new Promise<void>((r) => proxy.listen(0, '127.0.0.1', () => r()));
+  const port = (proxy.address() as net.AddressInfo).port;
+
+  let status = 0;
+  let body = '';
+  let complete = false;
+  try {
+    await new Promise<void>((resolve) => {
+      const req = http.request({ host: '127.0.0.1', port, path: '/x' }, (res) => {
+        status = res.statusCode ?? 0;
+        res.on('data', (chunk: Buffer) => { body += chunk; });
+        res.on('end', () => { complete = true; resolve(); });
+        res.on('error', () => resolve());
+      });
+      req.on('error', () => resolve());
+      req.end();
+    });
+    // The record is queued after the last byte is written, so give it a tick.
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    return { status, body, complete };
+  } finally {
+    proxy.close();
+  }
+}
+
+describe('handleExchange truncation reporting', () => {
+  it('records an exchange the transport reports as complete', async () => {
+    const onRecord = vi.fn();
+    const result = await runWithUpstream(stubUpstream('payload', { state: 'complete' }), onRecord);
+
+    expect(result).toEqual({ status: 200, body: 'payload', complete: true });
+    expect(onRecord).toHaveBeenCalledTimes(1);
+    expect(onRecord.mock.calls[0][0]).toMatchObject({ status: 200, response_size: 7 });
+  });
+
+  it('does not record an exchange the transport reports as truncated, even though the body stream ended cleanly', async () => {
+    const onRecord = vi.fn();
+    const result = await runWithUpstream(
+      stubUpstream('partial', { state: 'truncated', reason: 'stream reset with code 8' }),
+      onRecord,
+    );
+
+    // Bytes already received are still relayed — traffic fidelity comes first,
+    // and the client is entitled to what actually arrived. What must not happen
+    // is a *record* that presents those bytes as the whole response.
+    expect(result.body).toBe('partial');
+    expect(onRecord).not.toHaveBeenCalled();
+  });
+
+  it('does not record an exchange the transport has not finished accounting for', async () => {
+    // `pending` is an honest "don't know yet". Treating unknown as complete is
+    // the defect class this whole project is built around.
+    const onRecord = vi.fn();
+    await runWithUpstream(stubUpstream('unsure', { state: 'pending' }), onRecord);
+
     expect(onRecord).not.toHaveBeenCalled();
   });
 });

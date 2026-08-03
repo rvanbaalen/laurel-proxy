@@ -1,9 +1,10 @@
-import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach, vi } from 'vitest';
 import http from 'node:http';
 import https from 'node:https';
 import net from 'node:net';
 import tls from 'node:tls';
 import { ProxyServer } from './proxy.js';
+import { UpstreamTransport } from './upstream.js';
 import { Database } from '../storage/db.js';
 import { CertificateAuthority } from './ssl.js';
 import { EventManager } from './events.js';
@@ -127,6 +128,20 @@ describe('ProxyServer - HTTP', () => {
     try { fs.unlinkSync(dbPath); } catch {}
     try { fs.unlinkSync(dbPath + '-wal'); } catch {}
     try { fs.unlinkSync(dbPath + '-shm'); } catch {}
+  });
+
+  it('releases the upstream transport when stopped', async () => {
+    // The transport holds an ALPN cache and pooled h2 sessions — real sockets
+    // that nothing else in `ProxyServer` tracks. Leaving them open is how a CLI
+    // stops being able to exit, and how a test suite starts leaking sockets, so
+    // `stop()` owning `close()` is a property worth pinning rather than a detail.
+    const close = vi.spyOn(UpstreamTransport.prototype, 'close');
+    try {
+      await proxy.stop();
+      expect(close).toHaveBeenCalledTimes(1);
+    } finally {
+      close.mockRestore();
+    }
   });
 
   it('proxies HTTP GET and captures the request', async () => {

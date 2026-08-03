@@ -16,10 +16,20 @@ import type {
 } from './exchange.js';
 import { handleWebSocketUpgrade } from './websocket.js';
 import type { WebSocketDeps } from './websocket.js';
+import { UpstreamTransport } from './upstream.js';
 import type { Throttler } from './throttle.js';
 
 export class ProxyServer {
   private server: http.Server | null = null;
+  /**
+   * Owned here rather than per exchange because it is a cache and a connection
+   * pool: an h2 session is worth reusing across requests to the same origin, and
+   * an ALPN verdict is worth remembering. Its lifetime therefore has to match the
+   * server's, which is why it is created in `start` and closed in `stop` like
+   * `server` and `sockets` — an unclosed pool holds sockets, and this process is
+   * a CLI that has to be able to exit.
+   */
+  private upstream: UpstreamTransport | null = null;
   private sockets: Set<net.Socket> = new Set();
   private writeQueue: RequestRecord[] = [];
   private wsWriteQueue: WebSocketMessage[] = [];
@@ -34,6 +44,7 @@ export class ProxyServer {
   ) {}
 
   async start(): Promise<number> {
+    this.upstream = new UpstreamTransport();
     this.server = http.createServer((req, res) => this.handleRequest(req, res));
     this.server.on('connect', (req, clientSocket: net.Socket, head) => this.handleConnect(req, clientSocket, head));
     this.server.on('upgrade', (req, socket: net.Socket, head: Buffer) => {
@@ -61,6 +72,13 @@ export class ProxyServer {
       this.writeTimer = null;
     }
     this.flushWrites();
+    // Before the client sockets, and unconditionally: pooled h2 sessions are
+    // upstream sockets nothing else in this class knows about, and leaving them
+    // open keeps the event loop alive after `stop()` resolves.
+    if (this.upstream) {
+      this.upstream.close();
+      this.upstream = null;
+    }
     for (const socket of this.sockets) {
       socket.destroy();
     }
@@ -136,6 +154,7 @@ export class ProxyServer {
         this.events.push(record);
       },
       throttle: this.throttler ?? undefined,
+      upstream: this.upstream ?? undefined,
     };
   }
 
