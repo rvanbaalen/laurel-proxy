@@ -96,6 +96,42 @@ describe('formatRequests agent format', () => {
     expect(visible(wsOut).indexOf('example.com')).toBe(visible(httpOut).indexOf('example.com'));
   });
 
+  it('tells an agent about both wire-protocol hops, distinguishing unknown from a known value', () => {
+    const result: PaginatedResponse<RequestRecord> = {
+      data: [
+        makeRequest({ client_protocol: 'h2', origin_protocol: 'http/1.1' }),
+        makeRequest(),
+      ],
+      total: 2,
+      limit: 50,
+      offset: 0,
+    };
+    const parsed = JSON.parse(formatRequests(result, 'agent'));
+    expect(parsed.data[0].client_protocol).toBe('h2');
+    expect(parsed.data[0].origin_protocol).toBe('http/1.1');
+    // A record with no recorded hop must read back as null, never as a
+    // guessed 'http/1.1' — the dominant defect class this project watches for.
+    expect(parsed.data[1].client_protocol).toBeNull();
+    expect(parsed.data[1].origin_protocol).toBeNull();
+  });
+
+  it('marks an h2 client hop in the table format too, without shifting columns', () => {
+    const h2Out = formatRequests(
+      { data: [makeRequest({ client_protocol: 'h2' })], total: 1, limit: 50, offset: 0 },
+      'table',
+    );
+    const h1Out = formatRequests(
+      { data: [makeRequest({ client_protocol: 'http/1.1' })], total: 1, limit: 50, offset: 0 },
+      'table',
+    );
+    expect(h2Out).toContain('H2');
+    expect(h1Out).not.toContain('H2');
+
+    const visible = (out: string): string =>
+      (out.split('\n').find((line) => line.includes('example.com')) ?? '').replace(/\x1b\[[0-9;]*m/g, '');
+    expect(visible(h2Out).indexOf('example.com')).toBe(visible(h1Out).indexOf('example.com'));
+  });
+
   it('decodes Buffer bodies to strings', () => {
     const result: PaginatedResponse<RequestRecord> = {
       data: [makeRequest({ response_body: Buffer.from('{"hello":"world"}') })],
@@ -143,6 +179,29 @@ describe('formatRequest agent format', () => {
     const parsed = JSON.parse(output);
     expect(parsed.response.body_decoded).toMatch(/^\[binary response,/);
   });
+
+  it('carries both wire-protocol hops', () => {
+    const record = makeRequest({ client_protocol: 'h2', origin_protocol: 'http/1.1' });
+    const parsed = JSON.parse(formatRequest(record, 'agent'));
+    expect(parsed.client_protocol).toBe('h2');
+    expect(parsed.origin_protocol).toBe('http/1.1');
+  });
+});
+
+describe('formatRequest table format', () => {
+  it('shows unknown rather than a guessed value for an unrecorded hop', () => {
+    const record = makeRequest();
+    const output = formatRequest(record, 'table');
+    expect(output).toContain('unknown');
+    expect(output).not.toMatch(/Client Hop.*http\/1\.1/);
+  });
+
+  it('shows the negotiated protocol for each hop when known', () => {
+    const record = makeRequest({ client_protocol: 'h2', origin_protocol: 'http/1.1' });
+    const output = formatRequest(record, 'table');
+    expect(output).toMatch(/Client Hop.*h2/);
+    expect(output).toMatch(/Origin Hop.*http\/1\.1/);
+  });
 });
 
 describe('formatTailLine agent format', () => {
@@ -163,6 +222,20 @@ describe('formatTailLine agent format', () => {
   it('marks a WebSocket connection in the streamed table line', () => {
     expect(formatTailLine(makeRequest({ kind: 'websocket' }), 'table')).toContain('WS');
     expect(formatTailLine(makeRequest(), 'table')).not.toContain('WS');
+  });
+
+  it('carries both wire-protocol hops, so an agent can spot h2 as it streams', () => {
+    const parsed = JSON.parse(
+      formatTailLine(makeRequest({ client_protocol: 'h2', origin_protocol: 'http/1.1' }), 'agent'),
+    );
+    expect(parsed.client_protocol).toBe('h2');
+    expect(parsed.origin_protocol).toBe('http/1.1');
+    expect(JSON.parse(formatTailLine(makeRequest(), 'agent')).client_protocol).toBeNull();
+  });
+
+  it('marks an h2 client hop in the streamed table line', () => {
+    expect(formatTailLine(makeRequest({ client_protocol: 'h2' }), 'table')).toContain('H2');
+    expect(formatTailLine(makeRequest({ client_protocol: 'http/1.1' }), 'table')).not.toContain('H2');
   });
 });
 

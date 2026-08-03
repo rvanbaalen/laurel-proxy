@@ -183,6 +183,8 @@ function DetailView({ record, onBack }: { record: RequestRecord; onBack: () => v
           <Box><Text dimColor>  Status    </Text><Text color={statusColor(r.status)}>{String(r.status ?? '-')}</Text></Box>
           <Box><Text dimColor>  Duration  </Text><Text>{r.duration ? `${r.duration}ms` : '-'}</Text></Box>
           <Box><Text dimColor>  Protocol  </Text><Text>{r.protocol}</Text></Box>
+          <Box><Text dimColor>  Client Hop</Text><Text>{r.client_protocol ?? 'unknown'}</Text></Box>
+          <Box><Text dimColor>  Origin Hop</Text><Text>{r.origin_protocol ?? 'unknown'}</Text></Box>
           <Box><Text dimColor>  Time      </Text><Text>{new Date(r.timestamp).toISOString()}</Text></Box>
           <Box><Text dimColor>  Req Size  </Text><Text>{formatBytes(r.request_size || 0)}</Text></Box>
           <Box><Text dimColor>  Res Size  </Text><Text>{formatBytes(r.response_size || 0)}</Text></Box>

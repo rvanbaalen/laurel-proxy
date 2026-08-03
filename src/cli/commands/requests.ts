@@ -55,6 +55,9 @@ async function autoStartProxy(requestedUiPort: number): Promise<{ server: Laurel
 
 export const REQUEST_KINDS = ['http', 'websocket'] as const;
 
+/** The two wire protocols a hop can have negotiated. */
+export const WIRE_PROTOCOLS = ['http/1.1', 'h2'] as const;
+
 /** Build a RequestFilter from CLI options. Shared by tail and query paths. */
 export function buildFilter(opts: Record<string, string | boolean | undefined>): RequestFilter {
   const filter: RequestFilter = {};
@@ -64,6 +67,12 @@ export function buildFilter(opts: Record<string, string | boolean | undefined>):
   // command before it gets here; applying it anyway would return an empty list
   // that reads as "there is no such traffic" rather than "that is not a kind".
   if (opts.kind === 'http' || opts.kind === 'websocket') filter.kind = opts.kind;
+  if (opts.clientProtocol === 'http/1.1' || opts.clientProtocol === 'h2') {
+    filter.clientProtocol = opts.clientProtocol;
+  }
+  if (opts.originProtocol === 'http/1.1' || opts.originProtocol === 'h2') {
+    filter.originProtocol = opts.originProtocol;
+  }
   if (opts.method) filter.method = opts.method as string;
   if (opts.search) filter.search = opts.search as string;
   if (opts.since) filter.since = parseTime(opts.since as string);
@@ -100,6 +109,8 @@ export function registerRequests(program: Command): void {
     .option('--method <method>', 'Filter by HTTP method')
     .option('--search <pattern>', 'Search URL')
     .option('--kind <kind>', `Filter by traffic kind (${REQUEST_KINDS.join('|')})`)
+    .option('--client-protocol <protocol>', `Filter by client-hop wire protocol (${WIRE_PROTOCOLS.join('|')})`)
+    .option('--origin-protocol <protocol>', `Filter by origin-hop wire protocol (${WIRE_PROTOCOLS.join('|')})`)
     .option('--since <time>', 'Requests after this time')
     .option('--until <time>', 'Requests before this time')
     .option('--last-hour', 'Requests from the last hour')
@@ -120,6 +131,16 @@ export function registerRequests(program: Command): void {
 
       if (opts.kind && !REQUEST_KINDS.includes(opts.kind)) {
         console.error(`Invalid kind "${opts.kind}". Valid kinds: ${REQUEST_KINDS.join(', ')}`);
+        process.exit(1);
+      }
+
+      if (opts.clientProtocol && !WIRE_PROTOCOLS.includes(opts.clientProtocol)) {
+        console.error(`Invalid client protocol "${opts.clientProtocol}". Valid values: ${WIRE_PROTOCOLS.join(', ')}`);
+        process.exit(1);
+      }
+
+      if (opts.originProtocol && !WIRE_PROTOCOLS.includes(opts.originProtocol)) {
+        console.error(`Invalid origin protocol "${opts.originProtocol}". Valid values: ${WIRE_PROTOCOLS.join(', ')}`);
         process.exit(1);
       }
 
@@ -173,6 +194,9 @@ export function matchesFilter(record: RequestRecord, filter: RequestFilter): boo
   // Same default as the SQL path's NULL handling, so `--kind` selects the same
   // traffic whether it is applied to a query or to the live `--tail` stream.
   if (filter.kind && (record.kind ?? 'http') !== filter.kind) return false;
+  // Exact match, no NULL-inclusion fallback — see `RequestFilter.clientProtocol`.
+  if (filter.clientProtocol && record.client_protocol !== filter.clientProtocol) return false;
+  if (filter.originProtocol && record.origin_protocol !== filter.originProtocol) return false;
   if (filter.status && record.status !== filter.status) return false;
   if (filter.statusMin !== undefined && (record.status == null || record.status < filter.statusMin)) return false;
   if (filter.statusMax !== undefined && (record.status == null || record.status > filter.statusMax)) return false;

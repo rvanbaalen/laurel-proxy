@@ -98,6 +98,29 @@ function kindMarker(r: RequestRecord): string {
   return recordKind(r) === 'websocket' ? `${pc.cyan('WS')} ` : '';
 }
 
+/**
+ * A compact marker for a client hop that negotiated h2.
+ *
+ * Only h2 is tagged, matching `kindMarker`'s "only the non-default is worth a
+ * character" rule — the default (http/1.1, or unknown) is left blank rather
+ * than spelled out. Never co-occurs with `kindMarker`'s `WS` tag: a WebSocket
+ * connection's client hop is h1.1 by construction (see `websocket.ts`), so
+ * the two markers never compete for the same column width.
+ */
+function protocolMarker(r: RequestRecord): string {
+  return r.client_protocol === 'h2' ? `${pc.magenta('H2')} ` : '';
+}
+
+/**
+ * A wire-protocol value for display, distinguishing "unknown" from a guessed
+ * default. `client_protocol`/`origin_protocol` are `null`/absent only when
+ * genuinely not known (see the field docs in `src/shared/types.ts`) — never
+ * silently rendering that as `'http/1.1'` is the whole point of the field.
+ */
+function wireProtocolLabel(value: RequestRecord['client_protocol']): string {
+  return value === 'h2' || value === 'http/1.1' ? value : 'unknown';
+}
+
 function toAgentRecord(r: RequestRecord) {
   return {
     summary: agentSummary(r),
@@ -108,6 +131,15 @@ function toAgentRecord(r: RequestRecord) {
      * agent-side entry point.
      */
     kind: recordKind(r),
+    /**
+     * The two hops an h2 exchange has, exposed independently so an agent can
+     * spot the case a plain `protocol` (URL scheme) field could never show:
+     * an h2 client talking to an HTTP/1.1-only origin. `null` means genuinely
+     * unknown and must be read as such, not as "http/1.1" — see
+     * `RequestRecord.client_protocol`.
+     */
+    client_protocol: r.client_protocol ?? null,
+    origin_protocol: r.origin_protocol ?? null,
     request: {
       method: r.method,
       url: r.url,
@@ -184,7 +216,7 @@ export function formatRequests(result: PaginatedResponse<RequestRecord>, format:
 
   const rows = result.data.map((r) => {
     return '  ' +
-      padAnsi(kindMarker(r) + methodColor(r.method || ''), COL.method) +
+      padAnsi(kindMarker(r) + protocolMarker(r) + methodColor(r.method || ''), COL.method) +
       padAnsi(statusColor(r.status), COL.status) +
       (r.host || '').slice(0, COL.host - 2).padEnd(COL.host) +
       padAnsi(pc.dim((r.path || '').slice(0, COL.path - 2)), COL.path) +
@@ -214,6 +246,8 @@ export function formatRequest(record: RequestRecord, format: string): string {
     `  ${pc.dim('Duration')}  ${record.duration}ms`,
     `  ${pc.dim('Protocol')}  ${record.protocol}`,
     `  ${pc.dim('Kind')}      ${recordKind(record)}`,
+    `  ${pc.dim('Client Hop')} ${wireProtocolLabel(record.client_protocol)}`,
+    `  ${pc.dim('Origin Hop')} ${wireProtocolLabel(record.origin_protocol)}`,
     `  ${pc.dim('Time')}      ${new Date(record.timestamp).toISOString()}`,
     '',
     `  ${pc.bold('Request Headers')}`,
@@ -277,6 +311,11 @@ export function formatTailLine(r: RequestRecord, format: string): string {
       // Same reason as `toAgentRecord`: an agent tailing traffic has to be able
       // to spot a WebSocket connection as it opens, not only in a later query.
       kind: recordKind(r),
+      // Same reason again, for h2: an agent tailing traffic has to be able to
+      // spot an h2 exchange (or a mixed-hops one) as it happens, not only in a
+      // later `laurel-proxy request <id>` lookup.
+      client_protocol: r.client_protocol ?? null,
+      origin_protocol: r.origin_protocol ?? null,
       context: {
         is_error: r.status != null && r.status >= 400,
         content_type: r.content_type,
@@ -286,7 +325,7 @@ export function formatTailLine(r: RequestRecord, format: string): string {
 
   return '  ' +
     padAnsi(pc.dim(new Date(r.timestamp).toLocaleTimeString()), COL.time) +
-    padAnsi(kindMarker(r) + methodColor(r.method || ''), COL.method) +
+    padAnsi(kindMarker(r) + protocolMarker(r) + methodColor(r.method || ''), COL.method) +
     padAnsi(statusColor(r.status), COL.status) +
     (r.host || '').slice(0, COL.host - 2).padEnd(COL.host) +
     padAnsi(pc.dim((r.path || '').slice(0, COL.path - 2)), COL.path) +

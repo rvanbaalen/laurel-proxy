@@ -65,6 +65,18 @@ describe('buildFilter', () => {
     expect(buildFilter({ kind: 'webscoket' }).kind).toBeUndefined();
     expect(buildFilter({}).kind).toBeUndefined();
   });
+
+  it('maps --client-protocol and --origin-protocol independently', () => {
+    const filter = buildFilter({ clientProtocol: 'h2', originProtocol: 'http/1.1' });
+    expect(filter.clientProtocol).toBe('h2');
+    expect(filter.originProtocol).toBe('http/1.1');
+  });
+
+  it('ignores an unrecognised --client-protocol/--origin-protocol rather than filtering on a value nothing can match', () => {
+    expect(buildFilter({ clientProtocol: 'h3' }).clientProtocol).toBeUndefined();
+    expect(buildFilter({ originProtocol: 'h3' }).originProtocol).toBeUndefined();
+    expect(buildFilter({}).clientProtocol).toBeUndefined();
+  });
 });
 
 describe('matchesFilter', () => {
@@ -91,5 +103,27 @@ describe('matchesFilter', () => {
     expect(matchesFilter(makeRecord({ kind: 'http' }), { kind: 'websocket' })).toBe(false);
     expect(matchesFilter(makeRecord(), { kind: 'http' })).toBe(true);
     expect(matchesFilter(makeRecord(), { kind: 'websocket' })).toBe(false);
+  });
+
+  it('checks clientProtocol and originProtocol independently, with no NULL-inclusion fallback', () => {
+    // Unlike `kind`, an absent/null protocol must not satisfy either filter
+    // value — see the note on `RequestFilter.clientProtocol`.
+    expect(matchesFilter(makeRecord({ client_protocol: 'h2' }), { clientProtocol: 'h2' })).toBe(true);
+    expect(matchesFilter(makeRecord({ client_protocol: 'http/1.1' }), { clientProtocol: 'h2' })).toBe(false);
+    expect(matchesFilter(makeRecord(), { clientProtocol: 'http/1.1' })).toBe(false);
+    expect(matchesFilter(makeRecord(), { clientProtocol: 'h2' })).toBe(false);
+
+    expect(
+      matchesFilter(
+        makeRecord({ client_protocol: 'h2', origin_protocol: 'http/1.1' }),
+        { clientProtocol: 'h2', originProtocol: 'http/1.1' },
+      ),
+    ).toBe(true);
+    expect(
+      matchesFilter(
+        makeRecord({ client_protocol: 'h2', origin_protocol: 'h2' }),
+        { clientProtocol: 'h2', originProtocol: 'http/1.1' },
+      ),
+    ).toBe(false);
   });
 });
