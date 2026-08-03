@@ -462,10 +462,14 @@ describe('handleExchange recording failures', () => {
  * `bodyStatus()` is the only thing standing between a seven-byte fragment of an
  * eight-megabyte response and a row that claims it was a complete 200.
  */
-function stubUpstream(body: string, bodyStatus: BodyStatus): UpstreamRequester {
+function stubUpstream(
+  body: string,
+  bodyStatus: BodyStatus,
+  protocol: 'http/1.1' | 'h2' = 'http/1.1',
+): UpstreamRequester {
   return {
     request: async (): Promise<UpstreamResponse> => ({
-      protocol: 'http/1.1',
+      protocol,
       status: 200,
       headers: { 'content-type': 'text/plain' },
       body: Readable.from([Buffer.from(body)]),
@@ -479,6 +483,7 @@ function stubUpstream(body: string, bodyStatus: BodyStatus): UpstreamRequester {
 async function runWithUpstream(
   upstream: UpstreamRequester,
   onRecord: (record: RequestRecord) => void,
+  clientProtocol?: 'http/1.1' | 'h2',
 ): Promise<{ status: number; body: string; complete: boolean }> {
   const proxy = http.createServer((clientReq, clientRes) => {
     const target = resolveHttpTarget(`http://127.0.0.1:1${clientReq.url}`);
@@ -491,6 +496,7 @@ async function runWithUpstream(
       config: DEFAULT_CONFIG,
       onRecord,
       upstream,
+      clientProtocol,
     });
   });
   await new Promise<void>((r) => proxy.listen(0, '127.0.0.1', () => r()));
@@ -549,6 +555,48 @@ describe('handleExchange truncation reporting', () => {
     await runWithUpstream(stubUpstream('unsure', { state: 'pending' }), onRecord);
 
     expect(onRecord).not.toHaveBeenCalled();
+  });
+});
+
+describe('handleExchange wire protocol recording', () => {
+  it('records both hops as http/1.1 when neither the client nor the origin negotiated h2', async () => {
+    const onRecord = vi.fn();
+    await runWithUpstream(stubUpstream('payload', { state: 'complete' }, 'http/1.1'), onRecord);
+
+    expect(onRecord).toHaveBeenCalledTimes(1);
+    expect(onRecord.mock.calls[0][0]).toMatchObject({
+      client_protocol: 'http/1.1',
+      origin_protocol: 'http/1.1',
+    });
+  });
+
+  it('records the client hop as h2 while the origin hop stays http/1.1 — the independent-hops case', async () => {
+    // The flagship scenario this field exists for: an h2 client in front of an
+    // HTTP/1.1-only origin. Each hop's value has to come from where it was
+    // actually negotiated, not from each other.
+    const onRecord = vi.fn();
+    await runWithUpstream(
+      stubUpstream('payload', { state: 'complete' }, 'http/1.1'),
+      onRecord,
+      'h2',
+    );
+
+    expect(onRecord).toHaveBeenCalledTimes(1);
+    expect(onRecord.mock.calls[0][0]).toMatchObject({
+      client_protocol: 'h2',
+      origin_protocol: 'http/1.1',
+    });
+  });
+
+  it('records both hops as h2 when both negotiated it', async () => {
+    const onRecord = vi.fn();
+    await runWithUpstream(stubUpstream('payload', { state: 'complete' }, 'h2'), onRecord, 'h2');
+
+    expect(onRecord).toHaveBeenCalledTimes(1);
+    expect(onRecord.mock.calls[0][0]).toMatchObject({
+      client_protocol: 'h2',
+      origin_protocol: 'h2',
+    });
   });
 });
 

@@ -495,6 +495,15 @@ export async function handleExchange(
       duration: Date.now() - startTime,
       content_type: contentType,
       truncated: truncated ? 1 : 0,
+      // Both hops are known and definite at this point: the client hop is
+      // whatever `ProxyServer` negotiated via ALPN before this exchange was
+      // even dispatched (see `dispatchExchange`), defaulting to HTTP/1.1 only
+      // for the pre-existing call sites that never offered a choice — not a
+      // guess about an h2 client that failed to say so. The origin hop is the
+      // transport's own verdict after a real negotiation completed. Neither
+      // is ever "not sure", which is why this site never stores null.
+      client_protocol: deps.clientProtocol ?? 'http/1.1',
+      origin_protocol: proxyRes.protocol,
     });
   });
 }

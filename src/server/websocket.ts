@@ -118,6 +118,14 @@ export function handleWebSocketUpgrade(
         duration: Date.now() - startTime,
         content_type: 'websocket',
         truncated: 0,
+        // Both hops are h1.1 by construction, not by default: a WebSocket
+        // handshake only ever arrives via the `Upgrade` header, which HTTP/2
+        // forbids outright, so the client hop cannot be anything else. The
+        // upstream connection here is the plain `http`/`https` transport
+        // (never `UpstreamTransport`, never ALPN-negotiated), so the origin
+        // hop is equally definite.
+        client_protocol: 'http/1.1',
+        origin_protocol: 'http/1.1',
       }),
     );
 
@@ -204,6 +212,11 @@ export function handleWebSocketUpgrade(
         duration: Date.now() - startTime,
         content_type: (upstreamRes.headers['content-type'] || '').split(';')[0].trim() || null,
         truncated: responseSize > config.maxBodySize ? 1 : 0,
+        // Same reasoning as the accepted-upgrade row above: this refusal was
+        // still reached via an `Upgrade` request over the plain http/https
+        // transport, so both hops are h1.1 by construction.
+        client_protocol: 'http/1.1',
+        origin_protocol: 'http/1.1',
       });
     });
   };

@@ -340,6 +340,10 @@ describe('http2 client hop', () => {
       expect(rows[0].url).toBe(`https://localhost:${origin.port}/h2-echo`);
       expect(rows[0].request_size).toBe(payload.length);
       expect(Buffer.from(rows[0].request_body!).toString()).toBe(payload);
+      // Both hops really did negotiate h2 here — recorded independently, not
+      // inferred from one another.
+      expect(rows[0].client_protocol).toBe('h2');
+      expect(rows[0].origin_protocol).toBe('h2');
     } finally {
       await closeServer(origin.server);
     }
@@ -382,6 +386,11 @@ describe('http2 client hop', () => {
       // The recording keeps what the origin actually said, connection headers
       // and all — stripping is a relay concern, not a capture one.
       expect(JSON.parse(rows[0].response_headers!).connection).toBe('keep-alive');
+      // The property this whole feature exists for: the two hops really are
+      // different protocols, and the recording says so instead of collapsing
+      // them into one `protocol` value the way it did before Task 4.
+      expect(rows[0].client_protocol).toBe('h2');
+      expect(rows[0].origin_protocol).toBe('http/1.1');
     } finally {
       await closeServer(origin.server);
     }
@@ -408,7 +417,11 @@ describe('http2 client hop', () => {
       }
 
       await flushWrites();
-      expect(fixture.rows('/no-alpn')).toHaveLength(1);
+      const rows = fixture.rows('/no-alpn');
+      expect(rows).toHaveLength(1);
+      // No ALPN offered at all must land on http/1.1, never on a guessed h2.
+      expect(rows[0].client_protocol).toBe('http/1.1');
+      expect(rows[0].origin_protocol).toBe('http/1.1');
     } finally {
       await closeServer(origin.server);
     }
@@ -432,7 +445,10 @@ describe('http2 client hop', () => {
       }
 
       await flushWrites();
-      expect(fixture.rows('/alpn-h1')).toHaveLength(1);
+      const rows = fixture.rows('/alpn-h1');
+      expect(rows).toHaveLength(1);
+      expect(rows[0].client_protocol).toBe('http/1.1');
+      expect(rows[0].origin_protocol).toBe('http/1.1');
     } finally {
       await closeServer(origin.server);
     }

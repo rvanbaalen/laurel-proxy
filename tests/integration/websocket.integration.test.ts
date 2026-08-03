@@ -328,6 +328,10 @@ describe('websocket capture', () => {
     expect(recording.row.status).toBe(101);
     expect(recording.row.protocol).toBe('http');
     expect(recording.row.url).toBe(`http://127.0.0.1:${echo.port}/socket`);
+    // A WebSocket connection rides the `Upgrade` path, which HTTP/2 forbids
+    // outright — both hops are h1.1 by construction, not by default.
+    expect(recording.row.client_protocol).toBe('http/1.1');
+    expect(recording.row.origin_protocol).toBe('http/1.1');
     expect(recording.sent).toEqual(['hello', 'world']);
     expect(recording.received).toEqual(['echo:hello', 'echo:world']);
     expect(recording.messages.every((m) => m.opcode === 'text')).toBe(true);
@@ -474,6 +478,11 @@ describe('websocket capture', () => {
       // A refused upgrade is an ordinary HTTP exchange, not a connection.
       expect(rows[0].kind).toBe('http');
       expect(rows[0].status).toBe(426);
+      // Still reached via `Upgrade` over the plain http/https transport, so
+      // both hops are h1.1 by construction even though the upgrade itself
+      // was refused.
+      expect(rows[0].client_protocol).toBe('http/1.1');
+      expect(rows[0].origin_protocol).toBe('http/1.1');
       expect(Buffer.from(rows[0].response_body!).toString()).toBe('Upgrade Required');
       expect(db.getWebSocketMessages(rows[0].id).total).toBe(0);
     } finally {
