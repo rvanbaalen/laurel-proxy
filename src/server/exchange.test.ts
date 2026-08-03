@@ -1,7 +1,7 @@
 import { describe, it, expect, vi } from 'vitest';
 import http from 'node:http';
 import http2 from 'node:http2';
-import { Readable } from 'node:stream';
+import { PassThrough, Readable } from 'node:stream';
 import type net from 'node:net';
 import {
   failExchange,
@@ -12,9 +12,11 @@ import {
   sendableStatus,
 } from './exchange.js';
 import type { ExchangeRequest, ExchangeResponse, UpstreamRequester } from './exchange.js';
+import { countingBody } from './upstream.js';
 import type { BodyStatus, UpstreamResponse } from './upstream.js';
-import { DEFAULT_CONFIG } from '../shared/types.js';
+import { DEFAULT_CONFIG, DEFAULT_THROTTLE } from '../shared/types.js';
 import type { Config, RequestRecord } from '../shared/types.js';
+import { Throttler } from './throttle.js';
 import { watchProcessErrors } from '../../tests/helpers/process-errors.js';
 
 describe('resolveHttpTarget', () => {
@@ -667,5 +669,80 @@ describe('handleExchange', () => {
 
     proxyServer.close();
     upstream.close();
+  });
+
+  it('survives an upstream body that fails during the latency injection', async () => {
+    // The exact shipped window, end to end: `handleExchange` resolves the upstream
+    // response, awaits `delayLatency()` — a real timer of hundreds of milliseconds
+    // under `laurel-proxy throttle 3g` — and only then starts iterating. An h2 body
+    // that truncates inside it destroys a stream with no consumer attached, and an
+    // unhandled 'error' *event* is an uncaught exception that `dispatchExchange`'s
+    // `.catch()` structurally cannot see. The body here is a real `countingBody`,
+    // since the guard being tested lives inside it.
+    const source = new PassThrough() as unknown as http2.ClientHttp2Stream;
+    Object.defineProperty(source, 'rstCode', { value: 0, configurable: true });
+    let bodyStatus: BodyStatus = { state: 'pending' };
+    const upstream: UpstreamRequester = {
+      request: async (): Promise<UpstreamResponse> => {
+        const body = countingBody(source, 1000, (settled) => {
+          bodyStatus = settled;
+        });
+        // Truncates well inside the 200ms latency below, i.e. before anything
+        // is iterating.
+        setTimeout(() => source.end('short'), 20);
+        return {
+          protocol: 'h2',
+          status: 200,
+          headers: { 'content-type': 'text/plain' },
+          body,
+          bodyStatus: () => bodyStatus,
+        };
+      },
+    };
+
+    const onRecord = vi.fn();
+    const proxyServer = http.createServer((clientReq, clientRes) => {
+      const target = resolveHttpTarget(`http://127.0.0.1:1${clientReq.url}`);
+      if (!target) {
+        clientRes.writeHead(400);
+        clientRes.end();
+        return;
+      }
+      // Dispatched exactly as `ProxyServer` does it, `.catch()` included: that is
+      // what makes this a test of whether the failure is even *reachable* by a
+      // rejection handler.
+      void handleExchange(clientReq, clientRes, target, {
+        config: DEFAULT_CONFIG,
+        onRecord,
+        upstream,
+        throttle: new Throttler({ ...DEFAULT_THROTTLE, enabled: true, latencyMs: 200 }),
+      }).catch(() => failExchange(clientRes));
+    });
+    await new Promise<void>((resolve) => proxyServer.listen(0, '127.0.0.1', () => resolve()));
+    const proxyPort = (proxyServer.address() as net.AddressInfo).port;
+
+    try {
+      const escaped = await watchProcessErrors(
+        () =>
+          new Promise<void>((resolve) => {
+            const req = http.request({ host: '127.0.0.1', port: proxyPort, path: '/slow' }, (res) => {
+              res.on('data', () => {});
+              res.on('end', () => resolve());
+              res.on('aborted', () => resolve());
+              res.on('error', () => resolve());
+            });
+            req.on('error', () => resolve());
+            req.end();
+          }),
+      );
+
+      // The proxy stays up. Losing the exchange is the acceptable half of the
+      // trade; the truncated body must not be recorded as a complete one either.
+      expect(escaped).toEqual([]);
+      expect(bodyStatus).toEqual({ state: 'truncated', reason: 'expected 1000 bytes, received 5' });
+      expect(onRecord).not.toHaveBeenCalled();
+    } finally {
+      proxyServer.close();
+    }
   });
 });
