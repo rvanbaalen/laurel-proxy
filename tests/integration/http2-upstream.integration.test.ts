@@ -712,6 +712,37 @@ describe('upstream HTTP/1.1 truncation detection is unchanged', () => {
       await closeServer(server);
     }
   });
+
+  it('keeps calling a complete response complete when a late error arrives', async () => {
+    // A message Node itself reports as complete must not be downgraded by an
+    // error that turns up afterwards — that would drop a perfectly good record.
+    // The error is emitted by hand because nothing produces this state on demand:
+    // that is the point, since an ordering that is only right by unreachability
+    // is one a future edit silently breaks. Emitting is safe and observable
+    // precisely because the transport attaches its own 'error' listener.
+    const server = http.createServer((_req, res) => {
+      res.writeHead(200, { 'content-type': 'text/plain', 'content-length': '5' });
+      res.end('whole');
+    });
+    const port = await listen(server);
+    const transport = new UpstreamTransport();
+    try {
+      const res = await transport.request({
+        target: { hostname: '127.0.0.1', port, protocol: 'http', path: '/' },
+        method: 'GET',
+        headers: { host: '127.0.0.1' },
+        body: Buffer.alloc(0),
+      });
+      expect((await drain(res)).text).toBe('whole');
+      expect(await settledStatus(res)).toEqual({ state: 'complete' });
+
+      res.body.emit('error', new Error('late socket error'));
+      expect(res.bodyStatus()).toEqual({ state: 'complete' });
+    } finally {
+      transport.close();
+      await closeServer(server);
+    }
+  });
 });
 
 // ---- GOAWAY and session pooling -------------------------------------------

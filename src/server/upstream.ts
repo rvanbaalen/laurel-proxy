@@ -584,9 +584,16 @@ export class UpstreamTransport {
       headers: res.headers,
       body: res,
       bodyStatus: () => {
-        if (failure !== null) return { state: 'truncated', reason: failure };
+        // Order matters, and it is completeness first. `res.complete` is Node's
+        // own verdict on whether the whole message arrived; a captured `failure`
+        // only explains *why* one did not. Asking about the failure first meant a
+        // late 'error' on a response that had already arrived in full would report
+        // `truncated` and cost a perfectly good record. Nothing reaches that state
+        // on the same tick today — which is exactly why the ordering should say
+        // what it means rather than rely on that continuing to hold.
         if (!res.readableEnded && !res.destroyed) return { state: 'pending' };
         if (res.complete) return { state: 'complete' };
+        if (failure !== null) return { state: 'truncated', reason: failure };
         return { state: 'truncated', reason: 'incomplete message' };
       },
     };
