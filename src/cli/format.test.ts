@@ -202,6 +202,33 @@ describe('formatRequest table format', () => {
     expect(output).toMatch(/Client Hop.*h2/);
     expect(output).toMatch(/Origin Hop.*http\/1\.1/);
   });
+
+  it('starts every meta value in the same column', () => {
+    // `Client Hop` and `Origin Hop` are the two longest labels, so hand-counted
+    // padding put their values one character off from every other row. Asserting
+    // the column rather than the spacing means the next label of any length is
+    // either aligned or a failure here.
+    const record = makeRequest({ client_protocol: 'h2', origin_protocol: 'http/1.1' });
+    const lines = formatRequest(record, 'table')
+      // Colour codes would move every measured index; picocolors also disables
+      // them without a TTY, so measure the same string either way.
+      .replace(/\[[0-9;]*m/g, '')
+      .split('\n');
+
+    const labels = [
+      'ID', 'URL', 'Method', 'Status', 'Duration',
+      'Protocol', 'Kind', 'Client Hop', 'Origin Hop', 'Time',
+    ];
+    const valueColumns = labels.map((label) => {
+      const line = lines.find((l) => l.startsWith(`  ${label}`));
+      expect(line, `no meta line for ${label}`).toBeDefined();
+      const afterLabel = line!.indexOf(label) + label.length;
+      const rest = line!.slice(afterLabel);
+      return afterLabel + (rest.length - rest.trimStart().length);
+    });
+
+    expect(new Set(valueColumns).size, `columns: ${valueColumns.join(',')}`).toBe(1);
+  });
 });
 
 describe('formatTailLine agent format', () => {

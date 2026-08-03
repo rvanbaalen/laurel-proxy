@@ -228,6 +228,22 @@ export function formatRequests(result: PaginatedResponse<RequestRecord>, format:
   return ['', header, divider, ...rows, footer, ''].join('\n');
 }
 
+/**
+ * One `label   value` line of a request's meta block.
+ *
+ * The padding is computed rather than typed out because it was typed out: the two
+ * longest labels, `Client Hop` and `Origin Hop`, were padded to a different width
+ * from every other row, so their values sat one character off. `META_LABEL_WIDTH`
+ * is two wider than the longest label so that the next one added is aligned by
+ * construction — and if it ever exceeds the width, the value keeps a single space
+ * rather than running into the label.
+ */
+const META_LABEL_WIDTH = 12;
+
+function metaLine(label: string, value: string): string {
+  return `  ${pc.dim(label)}${' '.repeat(Math.max(1, META_LABEL_WIDTH - label.length))}${value}`;
+}
+
 export function formatRequest(record: RequestRecord, format: string): string {
   if (format === 'json') {
     return JSON.stringify(record, null, 2);
@@ -239,16 +255,16 @@ export function formatRequest(record: RequestRecord, format: string): string {
 
   const lines: string[] = [
     '',
-    `  ${pc.dim('ID')}        ${record.id}`,
-    `  ${pc.dim('URL')}       ${pc.cyan(record.url)}`,
-    `  ${pc.dim('Method')}    ${methodColor(record.method)}`,
-    `  ${pc.dim('Status')}    ${statusColor(record.status)}`,
-    `  ${pc.dim('Duration')}  ${record.duration}ms`,
-    `  ${pc.dim('Protocol')}  ${record.protocol}`,
-    `  ${pc.dim('Kind')}      ${recordKind(record)}`,
-    `  ${pc.dim('Client Hop')} ${wireProtocolLabel(record.client_protocol)}`,
-    `  ${pc.dim('Origin Hop')} ${wireProtocolLabel(record.origin_protocol)}`,
-    `  ${pc.dim('Time')}      ${new Date(record.timestamp).toISOString()}`,
+    metaLine('ID', record.id),
+    metaLine('URL', pc.cyan(record.url)),
+    metaLine('Method', methodColor(record.method)),
+    metaLine('Status', statusColor(record.status)),
+    metaLine('Duration', `${record.duration}ms`),
+    metaLine('Protocol', record.protocol),
+    metaLine('Kind', recordKind(record)),
+    metaLine('Client Hop', wireProtocolLabel(record.client_protocol)),
+    metaLine('Origin Hop', wireProtocolLabel(record.origin_protocol)),
+    metaLine('Time', new Date(record.timestamp).toISOString()),
     '',
     `  ${pc.bold('Request Headers')}`,
     formatHeaders(record.request_headers),
