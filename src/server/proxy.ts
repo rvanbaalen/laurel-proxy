@@ -21,6 +21,58 @@ import { UpstreamTransport } from './upstream.js';
 import type { NegotiatedProtocol } from './upstream.js';
 import type { Throttler } from './throttle.js';
 
+/**
+ * Cap on a MITM TLS handshake, after which the tunnel socket is destroyed.
+ *
+ * There used to be one for free. When the virtual `http.Server` was created
+ * immediately and handed the socket before the handshake, its `headersTimeout`
+ * (60s in Node 22) covered a client that connected and then sent nothing.
+ * Building the virtual server inside the `'secure'` handler — which ALPN requires,
+ * since `alpnProtocol` has no value before then — moved the handshake outside any
+ * server's timeouts, so a client could hold a CONNECT socket, and the certificate
+ * generated for it, indefinitely. This restores the bound at the same 60s, which
+ * is generous for a handshake and matches what the HTTP/1.1 path used to enforce.
+ */
+export const MITM_HANDSHAKE_TIMEOUT_MS = 60_000;
+
+export interface ProxyServerOptions {
+  /** Overrides {@link MITM_HANDSHAKE_TIMEOUT_MS}. Exists so tests need not wait a minute. */
+  mitmHandshakeTimeoutMs?: number;
+}
+
+/**
+ * Stands in for the line `tls.Server` runs on our behalf, and reports whether
+ * that line still exists.
+ *
+ * `Http2Session` refuses to set up its handle while it believes TLS is still in
+ * progress, and what it waits for is `secureConnect` — an event a server-side
+ * socket never emits. `secureConnecting` stays `true` forever on a hand-built
+ * server `TLSSocket`, because `tls.Server` is what normally clears it, in
+ * `onServerSocketSecure`, just before handing the finished socket to its
+ * `secureConnection` listeners. We are standing in for that listener, so we have
+ * to stand in for that line too. Measured on Node 22.21.1: without it the session
+ * never starts and every request on the tunnel hangs forever, with no error
+ * anywhere.
+ *
+ * Which is exactly why the property's existence is checked rather than assumed. A
+ * blind cast made a Node rename or removal of this internal field a class of
+ * *silent hangs* — the single worst failure mode to debug from a bug report. The
+ * boolean lets the caller fail the tunnel instead, and the unit test on a real
+ * `TLSSocket` is the canary that says which Node release broke it.
+ *
+ * The supported alternative, if this ever has to go: `http2.createSecureServer({
+ * allowHTTP1: true })` fed the raw CONNECT socket, letting one server terminate
+ * TLS and branch on ALPN itself. Not a drop-in — it would have to be checked
+ * against the `Upgrade`/WebSocket path, which currently depends on an
+ * `http.Server` seeing the decrypted socket, and `allowHTTP1` sessions have their
+ * own request/response shapes to thread through the pipeline.
+ */
+export function markHandshakeComplete(socket: object): boolean {
+  if (!('secureConnecting' in socket)) return false;
+  (socket as { secureConnecting: boolean }).secureConnecting = false;
+  return true;
+}
+
 export class ProxyServer {
   private server: http.Server | null = null;
   /**
@@ -43,6 +95,7 @@ export class ProxyServer {
     private ca: CertificateAuthority,
     private events: EventManager,
     private config: Config,
+    private options: ProxyServerOptions = {},
   ) {}
 
   async start(): Promise<number> {
@@ -227,6 +280,20 @@ export class ProxyServer {
         clientSocket.destroy();
       });
 
+      // Bound the handshake itself — see MITM_HANDSHAKE_TIMEOUT_MS. Nothing else
+      // is watching this window any more: the virtual server that used to enforce
+      // `headersTimeout` here is now built inside the `'secure'` handler below,
+      // because ALPN cannot be read before then.
+      const handshakeTimer = setTimeout(() => {
+        clientSocket.destroy();
+      }, this.options.mitmHandshakeTimeoutMs ?? MITM_HANDSHAKE_TIMEOUT_MS);
+      // A pending handshake must not be a reason the process cannot exit.
+      handshakeTimer.unref?.();
+      const clearHandshakeTimer = () => clearTimeout(handshakeTimer);
+      tlsSocket.once('secure', clearHandshakeTimer);
+      tlsSocket.once('close', clearHandshakeTimer);
+      clientSocket.once('close', clearHandshakeTimer);
+
       // `secure`, not `secureConnect`: the latter belongs to sockets created by
       // `tls.connect`. A server-side `TLSSocket` announces a completed handshake
       // as `secure`, and the handshake is the earliest moment `alpnProtocol` has
@@ -297,16 +364,20 @@ export class ProxyServer {
    * {@link serveH1Tunnel} is untouched and still the way wss:// is recorded.
    */
   private serveH2Tunnel(tlsSocket: tls.TLSSocket, hostname: string, port: number): void {
-    // `Http2Session` will not set up its handle while it believes TLS is still in
-    // progress, and what it then waits for is `secureConnect` — an event a
-    // server-side socket never emits. `secureConnecting` is left `true` forever on
-    // a hand-built server `TLSSocket`: `tls.Server` is what normally clears it,
-    // in `onServerSocketSecure`, just before handing the finished socket to its
-    // `secureConnection` listeners. We are standing in for that listener, so we
-    // have to stand in for that line too. Measured on Node 22.21.1 — without it
-    // the session never starts and every request on the tunnel hangs forever,
-    // with no error anywhere.
-    (tlsSocket as unknown as { secureConnecting: boolean }).secureConnecting = false;
+    // See `markHandshakeComplete` for what this stands in for and why. If the
+    // field it pokes ever stops existing, the tunnel is failed here rather than
+    // left to hang: an h2 session that never starts produces no error anywhere,
+    // and a proxy whose HTTPS requests silently never answer is far harder to
+    // diagnose from a bug report than one that closes the connection.
+    if (!markHandshakeComplete(tlsSocket)) {
+      tlsSocket.destroy(
+        new Error(
+          'cannot start an HTTP/2 session on this tunnel: TLSSocket has no ' +
+            'secureConnecting field (Node internals changed)',
+        ),
+      );
+      return;
+    }
 
     const virtualServer = http2.createServer();
     virtualServer.on('request', (clientReq, clientRes) => {

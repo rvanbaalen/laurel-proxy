@@ -3,7 +3,7 @@ import http from 'node:http';
 import https from 'node:https';
 import net from 'node:net';
 import tls from 'node:tls';
-import { ProxyServer } from './proxy.js';
+import { markHandshakeComplete, ProxyServer } from './proxy.js';
 import { UpstreamTransport } from './upstream.js';
 import { Database } from '../storage/db.js';
 import { CertificateAuthority } from './ssl.js';
@@ -422,6 +422,104 @@ describe('ProxyServer - HTTPS', () => {
     });
 
     expect(connectResult.statusCode).toBe(200);
+  });
+});
+
+/**
+ * A client that opens a CONNECT tunnel and then never starts TLS.
+ *
+ * Nothing used to be able to hold one indefinitely: the virtual `http.Server` was
+ * created immediately and given the socket, so its `headersTimeout` killed a
+ * connection that sent no bytes. Reading ALPN means the virtual server can only be
+ * built inside the `'secure'` handler, which moved the handshake outside every
+ * server timeout — so the bound has to be explicit, and pinned.
+ */
+describe('ProxyServer - MITM handshake timeout', () => {
+  let proxy: ProxyServer;
+  let db: Database;
+  let events: EventManager;
+  let dbPath: string;
+  let caDir: string;
+  let proxyPort: number;
+
+  beforeEach(async () => {
+    dbPath = path.join(os.tmpdir(), `laurel-proxy-test-${randomUUID()}.db`);
+    caDir = path.join(os.tmpdir(), `laurel-proxy-ca-test-${randomUUID()}`);
+    db = new Database(dbPath);
+    events = new EventManager();
+    const ca = new CertificateAuthority(caDir, 10);
+    ca.init();
+    const config: Config = { ...DEFAULT_CONFIG, proxyPort: 0, dbPath };
+    // 250ms stands in for the 60s default; the property is that *a* bound exists.
+    proxy = new ProxyServer(db, ca, events, config, { mitmHandshakeTimeoutMs: 250 });
+    proxyPort = await proxy.start();
+  });
+
+  afterEach(async () => {
+    await proxy.stop();
+    events.stop();
+    db.close();
+    fs.rmSync(caDir, { recursive: true, force: true });
+    for (const suffix of ['', '-wal', '-shm']) {
+      try { fs.unlinkSync(dbPath + suffix); } catch { /* nothing to remove */ }
+    }
+  });
+
+  it('closes a tunnel whose TLS handshake never happens', async () => {
+    const socket = await new Promise<net.Socket>((resolve, reject) => {
+      const req = http.request({
+        host: '127.0.0.1',
+        port: proxyPort,
+        method: 'CONNECT',
+        path: 'localhost:443',
+      });
+      req.on('connect', (_res, tunnel) => resolve(tunnel as net.Socket));
+      req.on('error', reject);
+      req.end();
+    });
+
+    try {
+      // Not one byte of ClientHello. Before the bound existed, this socket — and
+      // the certificate minted for it — stayed alive until the client gave up.
+      const closed = await new Promise<boolean>((resolve) => {
+        const giveUp = setTimeout(() => resolve(false), 4000);
+        socket.once('close', () => {
+          clearTimeout(giveUp);
+          resolve(true);
+        });
+      });
+      expect(closed).toBe(true);
+    } finally {
+      socket.destroy();
+    }
+  }, 10_000);
+});
+
+describe('markHandshakeComplete', () => {
+  it('clears the flag and reports that it did', () => {
+    const socket = { secureConnecting: true };
+    expect(markHandshakeComplete(socket)).toBe(true);
+    expect(socket.secureConnecting).toBe(false);
+  });
+
+  it('reports a missing field instead of pretending to have cleared it', () => {
+    // The whole point of the boolean: without it, a Node rename of this internal
+    // field turned every h2 tunnel into a silent hang.
+    expect(markHandshakeComplete({})).toBe(false);
+  });
+
+  it('still finds the field on a real TLSSocket', () => {
+    // The canary. When this fails, `serveH2Tunnel` has started failing tunnels
+    // with a diagnosable error and the alternative named in `markHandshakeComplete`
+    // (an `http2.createSecureServer({ allowHTTP1: true })` fed the raw socket) is
+    // the way forward.
+    const socket = new tls.TLSSocket(new net.Socket());
+    try {
+      expect(markHandshakeComplete(socket)).toBe(true);
+      expect((socket as unknown as { secureConnecting: boolean }).secureConnecting).toBe(false);
+    } finally {
+      socket.destroy();
+    }
   });
 });
 
