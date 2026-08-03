@@ -80,6 +80,29 @@ describe('sendableStatus', () => {
     expect(sendableStatus(1000)).toBe(500);
     expect(sendableStatus(undefined)).toBe(500);
   });
+
+  it('narrows to what an HTTP/2 response writer accepts for an h2 client', () => {
+    // Measured on Node 22.21.1: `Http2ServerResponse.writeHead` throws
+    // ERR_HTTP2_STATUS_INVALID for every one of these, while the HTTP/1.1 writer
+    // takes them all. 101 is not a special case — the whole 1xx range is out.
+    for (const status of [99, 100, 101, 102, 199, 600, 700, 999, 1000]) {
+      expect(sendableStatus(status, 'h2')).toBe(500);
+    }
+    // And nothing inside the h2 range is touched.
+    for (const status of [200, 204, 404, 500, 599]) {
+      expect(sendableStatus(status, 'h2')).toBe(status);
+    }
+  });
+
+  it('leaves the HTTP/1.1 range alone, explicitly and by default', () => {
+    // The same values an h2 client cannot be sent are perfectly sendable here,
+    // and the omitted-argument default has to keep meaning HTTP/1.1: every
+    // pre-existing call site relies on it.
+    for (const status of [100, 101, 199, 600, 999]) {
+      expect(sendableStatus(status, 'http/1.1')).toBe(status);
+      expect(sendableStatus(status)).toBe(status);
+    }
+  });
 });
 
 /**

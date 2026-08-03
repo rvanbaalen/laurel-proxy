@@ -454,6 +454,80 @@ describe('http2 client hop', () => {
     }
   }, 30_000);
 
+  /**
+   * An origin whose status line no response writer will accept.
+   *
+   * Node's HTTP/1.1 writer takes any status 100–999 and its client parser takes
+   * any three-digit status line, so a 6xx really does reach the pipeline from a
+   * malformed origin. What each *client* hop can be sent differs, and that is the
+   * point of these two tests: HTTP/1.1 takes 100–999, while
+   * `Http2ServerResponse.writeHead` rejects everything outside 200–599 with
+   * `ERR_HTTP2_STATUS_INVALID` — measured on Node 22.21.1 for 600, 700, 999 and
+   * for every 1xx, 101 included. Either way the *record* keeps what the origin
+   * said, because a capture of a malformed response has to stay accurate.
+   */
+  const weirdStatusOrigin = () =>
+    h1Origin((_req, res) => {
+      res.writeHead(600, { 'content-type': 'text/plain' });
+      res.end('odd-status');
+    });
+
+  it('coerces an unsendable origin status for an h2 client and records the original', async () => {
+    const origin = await weirdStatusOrigin();
+
+    try {
+      const session = await h2Through(fixture.proxyPort, 'localhost', origin.port);
+      try {
+        const res = await orHang(h2Request(session, { ':method': 'GET', ':path': '/h2-odd-status' }));
+        expect(res).not.toBe('HUNG');
+        // 500 on the wire, and the body still relayed. Throwing here instead
+        // meant a 502 from `failExchange` — with the upstream body left
+        // unconsumed, which is what re-opened the truncation crash for that
+        // origin.
+        expect((res as H2Result).status).toBe(500);
+        expect((res as H2Result).body).toBe('odd-status');
+      } finally {
+        session.destroy();
+      }
+
+      await flushWrites();
+      const rows = fixture.rows('/h2-odd-status');
+      expect(rows).toHaveLength(1);
+      // The wire/record split, kept: the capture says 600.
+      expect(rows[0].status).toBe(600);
+      expect(rows[0].client_protocol).toBe('h2');
+      expect(rows[0].origin_protocol).toBe('http/1.1');
+    } finally {
+      await closeServer(origin.server);
+    }
+  }, 30_000);
+
+  it('still relays an unsendable-for-h2 status verbatim to an HTTP/1.1 client', async () => {
+    const origin = await weirdStatusOrigin();
+
+    try {
+      const socket = await tunnelTls(fixture.proxyPort, 'localhost', origin.port, ['http/1.1']);
+      try {
+        const res = await orHang(h1Request(socket, 'localhost', '/h1-odd-status'));
+        expect(res).not.toBe('HUNG');
+        // Unchanged: 600 is sendable on HTTP/1.1, so it goes out as 600. The h2
+        // clamp must not narrow what an HTTP/1.1 client sees.
+        expect((res as { status: number }).status).toBe(600);
+        expect((res as { body: string }).body).toBe('odd-status');
+      } finally {
+        socket.destroy();
+      }
+
+      await flushWrites();
+      const rows = fixture.rows('/h1-odd-status');
+      expect(rows).toHaveLength(1);
+      expect(rows[0].status).toBe(600);
+      expect(rows[0].client_protocol).toBe('http/1.1');
+    } finally {
+      await closeServer(origin.server);
+    }
+  }, 30_000);
+
   it('fails an h2 client cleanly when it reaches for WebSockets', async () => {
     const origin = await h1Origin((_req, res) => {
       res.writeHead(200);

@@ -189,9 +189,27 @@ export function resolveMitmTarget(hostname: string, port: number, rawPath: strin
  * throw. This substitutes a status only for what cannot be sent, and only on the
  * wire — the record keeps the upstream response's own `status` as upstream stated
  * it, so a capture of a malformed response stays an accurate capture.
+ *
+ * **What is sendable depends on the client's protocol**, which is why this takes
+ * one. `Http2ServerResponse.writeHead` is stricter than the HTTP/1.1 writer in
+ * both directions: measured on Node 22.21.1, it throws `ERR_HTTP2_STATUS_INVALID`
+ * for `600`, `700`, `999` **and for every 1xx** — `100`, `101`, `102` and `199`
+ * all — while `599` is fine. So the h2 range is 200–599, not the 100–999 an
+ * HTTP/1.1 client accepts. (HTTP/2 has no `101`: the protocol carries no
+ * `Upgrade`, and informational responses go out through `additionalHeaders`, not
+ * a final status.) A 6xx origin status relayed to an h2 client used to throw out
+ * of the pipeline; `failExchange` then answered 502, leaving the h2 upstream body
+ * unconsumed.
+ *
+ * The HTTP/1.1 branch is byte-for-byte what it was, default included, so every
+ * pre-existing call site keeps its exact meaning.
  */
-export function sendableStatus(statusCode: number | undefined): number {
+export function sendableStatus(
+  statusCode: number | undefined,
+  clientProtocol: NegotiatedProtocol = 'http/1.1',
+): number {
   if (statusCode === undefined || !Number.isInteger(statusCode)) return 500;
+  if (clientProtocol === 'h2') return statusCode >= 200 && statusCode <= 599 ? statusCode : 500;
   return statusCode >= 100 && statusCode <= 999 ? statusCode : 500;
 }
 
@@ -406,7 +424,7 @@ export async function handleExchange(
   // The status on the wire is coerced to what a response writer will accept; the
   // record below keeps what upstream actually said. See `sendableStatus`.
   clientRes.writeHead(
-    sendableStatus(proxyRes.status),
+    sendableStatus(proxyRes.status, deps.clientProtocol),
     relayResponseHeaders(proxyRes.headers, deps.clientProtocol),
   );
 
