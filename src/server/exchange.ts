@@ -3,7 +3,9 @@ import https from 'node:https';
 import { randomUUID } from 'node:crypto';
 import { URL } from 'node:url';
 import { waitForDrain } from './stream-utils.js';
+import type { DrainableStream } from './stream-utils.js';
 import { recordSafely } from '../shared/never-fatal.js';
+import type { NegotiatedProtocol } from './upstream.js';
 import type { Config, RequestRecord } from '../shared/types.js';
 import type { Throttler } from './throttle.js';
 
@@ -13,6 +15,55 @@ export interface ExchangeTarget {
   protocol: 'http' | 'https';
   url: string;
   path: string;
+}
+
+/**
+ * The slice of an inbound request this pipeline reads.
+ *
+ * Structural rather than `http.IncomingMessage` because HTTP/2 arrives as an
+ * `Http2ServerRequest`, which is **not** a subclass of it — Node's compatibility
+ * API is a separate class that deliberately mirrors the shape. Nominal typing
+ * would force either a cast or a duplicated pipeline; naming the four members
+ * actually used means both classes satisfy it on their own terms, and anything
+ * this pipeline starts depending on has to be added here first.
+ *
+ * `method` and `url` are optional because `http.IncomingMessage` declares them
+ * so (a server-side message always has them in practice, but the type does not
+ * say that); `Http2ServerRequest` declares them required, which is assignable.
+ */
+export interface ExchangeRequest extends AsyncIterable<Buffer> {
+  readonly method?: string | undefined;
+  readonly url?: string | undefined;
+  readonly headers: http.IncomingHttpHeaders;
+}
+
+/**
+ * The slice of an outbound response this pipeline writes.
+ *
+ * Same reasoning as {@link ExchangeRequest}: `Http2ServerResponse` is a separate
+ * class from `http.ServerResponse`, so the seam has to be structural. It extends
+ * {@link DrainableStream} because backpressure is part of the surface — the relay
+ * awaits `waitForDrain(clientRes)` — and that interface already exists for the
+ * same reason on the WebSocket side.
+ *
+ * `end` is two overloads rather than one optional parameter on purpose: with a
+ * single `end(data?: string)` neither class's overload set is assignable to it,
+ * since `end(cb?)` and `end(chunk, cb?)` are distinct signatures and TypeScript
+ * matches the whole thing at once.
+ *
+ * The inherited `destroyed` is `boolean | undefined` because an
+ * `Http2ServerResponse` genuinely does not have it at runtime — see
+ * `DrainableStream`. Treat it as a fast path, never as proof that a response is
+ * still writable.
+ */
+export interface ExchangeResponse extends DrainableStream {
+  readonly headersSent: boolean;
+  readonly writableEnded: boolean;
+  writeHead(statusCode: number, headers?: http.OutgoingHttpHeaders): unknown;
+  write(chunk: Buffer): boolean;
+  end(): unknown;
+  end(data: string): unknown;
+  destroy(error?: Error): unknown;
 }
 
 export interface ExchangeDeps {
@@ -78,6 +129,56 @@ export function sendableStatus(statusCode: number | undefined): number {
 }
 
 /**
+ * Headers HTTP/2 forbids on any message, so they can never be relayed to an h2
+ * client. `writeHead` on an `Http2ServerResponse` does not ignore them — Node's
+ * `mapToHeaders` throws `ERR_HTTP2_INVALID_CONNECTION_HEADERS`, out of an
+ * exchange nobody awaits.
+ */
+const H2_FORBIDDEN_RESPONSE_HEADERS = [
+  'connection',
+  'transfer-encoding',
+  'keep-alive',
+  'proxy-connection',
+  'upgrade',
+  'http2-settings',
+];
+
+/**
+ * Upstream's response headers, adjusted for the protocol the client is on.
+ *
+ * The framing header goes in both cases and for the same reason: we re-frame the
+ * response ourselves. If upstream gave no `content-length` either (it used
+ * chunked encoding), Node re-introduces `Transfer-Encoding: chunked` as we
+ * stream — correct proxy behaviour, since we genuinely are chunking, and it keeps
+ * the connection reusable for keep-alive. Forcing `connection: close` instead is
+ * a regression the integration suite pins against.
+ *
+ * Everything *else* upstream said reaches an HTTP/1.1 client untouched, which is
+ * the pre-existing behaviour and is deliberately preserved: stripping `connection`
+ * for h1.1 too would look harmless but would quietly convert an upstream
+ * `connection: close` into a kept-alive client connection.
+ *
+ * For an h2 client the connection-specific headers cannot be relayed at all, so
+ * they are dropped — the protocol carries that information in frames instead.
+ * The parameter is how the two cases stay one function with one place to look:
+ * the caller says which client it is talking to, and the h1.1 default keeps every
+ * existing call site meaning exactly what it did before.
+ */
+export function relayResponseHeaders(
+  upstreamHeaders: http.IncomingHttpHeaders,
+  clientProtocol: NegotiatedProtocol = 'http/1.1',
+): http.OutgoingHttpHeaders {
+  const headers: http.OutgoingHttpHeaders = { ...upstreamHeaders };
+  delete headers['transfer-encoding'];
+  if (clientProtocol === 'h2') {
+    for (const name of H2_FORBIDDEN_RESPONSE_HEADERS) delete headers[name];
+    // `TE` survives into HTTP/2 only as exactly `trailers`.
+    if (headers.te !== undefined && String(headers.te) !== 'trailers') delete headers.te;
+  }
+  return headers;
+}
+
+/**
  * Answers — or gives up on — a client whose exchange threw somewhere the
  * pipeline did not expect.
  *
@@ -93,7 +194,7 @@ export function sendableStatus(statusCode: number | undefined): number {
  * Its own failures are swallowed: a throw from inside a `.catch()` handler is
  * another unhandled rejection, i.e. the exact thing this exists to prevent.
  */
-export function failExchange(clientRes: http.ServerResponse): void {
+export function failExchange(clientRes: ExchangeResponse): void {
   try {
     if (clientRes.writableEnded || clientRes.destroyed) return;
     if (!clientRes.headersSent) {
@@ -107,18 +208,24 @@ export function failExchange(clientRes: http.ServerResponse): void {
   }
 }
 
-function readBody(stream: http.IncomingMessage): Promise<Buffer> {
-  return new Promise((resolve, reject) => {
-    const chunks: Buffer[] = [];
-    stream.on('data', (chunk: Buffer) => chunks.push(chunk));
-    stream.on('end', () => resolve(Buffer.concat(chunks)));
-    stream.on('error', reject);
-  });
+/**
+ * Buffers a request body.
+ *
+ * Async iteration rather than `on('data')`/`on('end')`: it is the one consumption
+ * style both `http.IncomingMessage` and `Http2ServerRequest` offer through the
+ * same member, so it is what {@link ExchangeRequest} can require. It rejects on a
+ * stream error exactly as the event form did, and it cannot hang on a stream that
+ * ended before this was called.
+ */
+async function readBody(stream: ExchangeRequest): Promise<Buffer> {
+  const chunks: Buffer[] = [];
+  for await (const chunk of stream) chunks.push(chunk);
+  return Buffer.concat(chunks);
 }
 
 export async function handleExchange(
-  clientReq: http.IncomingMessage,
-  clientRes: http.ServerResponse,
+  clientReq: ExchangeRequest,
+  clientRes: ExchangeResponse,
   target: ExchangeTarget,
   deps: ExchangeDeps,
 ): Promise<void> {
@@ -138,6 +245,13 @@ export async function handleExchange(
   delete upstreamHeaders['accept-encoding'];
   if (target.protocol === 'https') upstreamHeaders.host = target.hostname;
 
+  // Pace the upload before sending the body upstream. Awaiting here (rather
+  // than chaining off an optionally-chained call) means this degrades to a
+  // plain no-op await when throttling is absent or disabled — see Throttler.
+  if (requestBody.length > 0) {
+    await deps.throttle?.up.consume(requestBody.length);
+  }
+
   const transport = target.protocol === 'https' ? https : http;
   const options: https.RequestOptions = {
     hostname: target.hostname,
@@ -147,13 +261,6 @@ export async function handleExchange(
     headers: upstreamHeaders,
     ...(target.protocol === 'https' ? { rejectUnauthorized: false } : {}),
   };
-
-  // Pace the upload before sending the body upstream. Awaiting here (rather
-  // than chaining off an optionally-chained call) means this degrades to a
-  // plain no-op await when throttling is absent or disabled — see Throttler.
-  if (requestBody.length > 0) {
-    await deps.throttle?.up.consume(requestBody.length);
-  }
 
   let proxyRes: http.IncomingMessage;
   try {
@@ -176,14 +283,9 @@ export async function handleExchange(
   // streaming loop below.
   await deps.throttle?.delayLatency();
 
-  const resHeaders = { ...proxyRes.headers };
-  // Strip upstream's framing header; we re-frame the response ourselves. If
-  // upstream gave us no content-length either (e.g. it used chunked
-  // encoding), Node will automatically re-introduce Transfer-Encoding:
-  // chunked as we stream — that's correct proxy behaviour (we genuinely are
-  // chunking) and keeps the connection reusable for keep-alive.
-  delete resHeaders['transfer-encoding'];
-  clientRes.writeHead(sendableStatus(proxyRes.statusCode), resHeaders);
+  // The status on the wire is coerced to what a response writer will accept; the
+  // record below keeps what upstream actually said. See `sendableStatus`.
+  clientRes.writeHead(sendableStatus(proxyRes.statusCode), relayResponseHeaders(proxyRes.headers));
 
   const captured: Buffer[] = [];
   let capturedLength = 0;

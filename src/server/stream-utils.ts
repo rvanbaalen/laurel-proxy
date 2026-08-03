@@ -1,10 +1,20 @@
 /**
  * The slice of a writable stream {@link waitForDrain} needs. Kept structural so
- * both `net.Socket` (the WebSocket relay) and `http.ServerResponse` (the HTTP
- * exchange) satisfy it — in Node's typings the latter is not a `Writable`.
+ * that `net.Socket` (the WebSocket relay), `http.ServerResponse` (the HTTP
+ * exchange) and `Http2ServerResponse` all satisfy it — in Node's typings the
+ * second is not a `Writable`, and the third is a separate class from the second.
+ *
+ * `destroyed` is `boolean | undefined` because on Node 22.21.1 an
+ * `Http2ServerResponse` **does not have the property at all**, despite
+ * `@types/node` declaring it (the class is typed as extending `stream.Writable`;
+ * the compatibility object only forwards some of that surface, and `destroyed`
+ * lives on `res.stream`). Measured, not read from the docs. So `undefined` here
+ * means "unknown", never "not destroyed" — which is why the check below is a
+ * fast path and the `close`/`error` listeners, not the check, are what guarantee
+ * this settles.
  */
 export interface DrainableStream {
-  destroyed: boolean;
+  destroyed: boolean | undefined;
   on(event: 'drain' | 'close' | 'error', listener: () => void): unknown;
   off(event: 'drain' | 'close' | 'error', listener: () => void): unknown;
 }

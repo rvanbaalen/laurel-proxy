@@ -8,7 +8,12 @@ import type { Config, RequestRecord, WebSocketMessage } from '../shared/types.js
 import { listenWithRetry } from './port-utils.js';
 import { recordSafely } from '../shared/never-fatal.js';
 import { failExchange, handleExchange, resolveHttpTarget, resolveMitmTarget } from './exchange.js';
-import type { ExchangeDeps, ExchangeTarget } from './exchange.js';
+import type {
+  ExchangeDeps,
+  ExchangeRequest,
+  ExchangeResponse,
+  ExchangeTarget,
+} from './exchange.js';
 import { handleWebSocketUpgrade } from './websocket.js';
 import type { WebSocketDeps } from './websocket.js';
 import type { Throttler } from './throttle.js';
@@ -158,8 +163,8 @@ export class ProxyServer {
    * exchange is not additionally a hung client.
    */
   private dispatchExchange(
-    clientReq: http.IncomingMessage,
-    clientRes: http.ServerResponse,
+    clientReq: ExchangeRequest,
+    clientRes: ExchangeResponse,
     target: ExchangeTarget,
   ): void {
     void handleExchange(clientReq, clientRes, target, this.exchangeDeps)

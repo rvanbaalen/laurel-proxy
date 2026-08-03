@@ -1,7 +1,15 @@
 import { describe, it, expect, vi } from 'vitest';
 import http from 'node:http';
+import http2 from 'node:http2';
 import type net from 'node:net';
-import { resolveHttpTarget, resolveMitmTarget, handleExchange, sendableStatus } from './exchange.js';
+import {
+  handleExchange,
+  relayResponseHeaders,
+  resolveHttpTarget,
+  resolveMitmTarget,
+  sendableStatus,
+} from './exchange.js';
+import type { ExchangeRequest, ExchangeResponse } from './exchange.js';
 import { DEFAULT_CONFIG } from '../shared/types.js';
 import type { Config, RequestRecord } from '../shared/types.js';
 import { watchProcessErrors } from '../../tests/helpers/process-errors.js';
@@ -68,6 +76,167 @@ describe('sendableStatus', () => {
     expect(sendableStatus(99)).toBe(500);
     expect(sendableStatus(1000)).toBe(500);
     expect(sendableStatus(undefined)).toBe(500);
+  });
+});
+
+/**
+ * The seam `handleExchange` declares, reduced to what it presents at runtime.
+ *
+ * Calling this *is* the compile-time assertion: the parameter types are the
+ * pipeline's own, so a seam that stopped accepting one of Node's two server
+ * request/response pairs would fail `npm run typecheck` here (`tsconfig.json`
+ * type-checks test files). The returned shape then also proves the members exist
+ * at runtime, which the types alone do not — a mistyped `destroyed` or a missing
+ * `off` would otherwise surface as a hang in Task 3 rather than a failure here.
+ */
+function describeSeam(req: ExchangeRequest, res: ExchangeResponse): Record<string, string> {
+  return {
+    'req.method': typeof req.method,
+    'req.url': typeof req.url,
+    'req.headers': typeof req.headers,
+    'req[asyncIterator]': typeof req[Symbol.asyncIterator],
+    'res.headersSent': typeof res.headersSent,
+    'res.writableEnded': typeof res.writableEnded,
+    'res.destroyed': typeof res.destroyed,
+    'res.writeHead': typeof res.writeHead,
+    'res.write': typeof res.write,
+    'res.end': typeof res.end,
+    'res.destroy': typeof res.destroy,
+    'res.on': typeof res.on,
+    'res.off': typeof res.off,
+  };
+}
+
+const EXPECTED_SEAM: Record<string, string> = {
+  'req.method': 'string',
+  'req.url': 'string',
+  'req.headers': 'object',
+  'req[asyncIterator]': 'function',
+  'res.headersSent': 'boolean',
+  'res.writableEnded': 'boolean',
+  'res.destroyed': 'boolean',
+  'res.writeHead': 'function',
+  'res.write': 'function',
+  'res.end': 'function',
+  'res.destroy': 'function',
+  'res.on': 'function',
+  'res.off': 'function',
+};
+
+/**
+ * `Http2ServerRequest`/`Http2ServerResponse` are not subclasses of
+ * `http.IncomingMessage`/`http.ServerResponse` — they are separate classes with
+ * deliberately similar APIs. These pin that the pipeline's parameter types are
+ * structural enough for both, which is the precondition for routing h2 through
+ * the same pipeline.
+ */
+describe('the exchange pipeline seam', () => {
+  it('is satisfied by HTTP/1.1 server request and response objects', async () => {
+    let seam: Record<string, string> | null = null;
+    const server = http.createServer((req, res) => {
+      seam = describeSeam(req, res);
+      res.writeHead(204);
+      res.end();
+    });
+    await new Promise<void>((r) => server.listen(0, '127.0.0.1', () => r()));
+    const port = (server.address() as net.AddressInfo).port;
+
+    try {
+      await new Promise<void>((resolve, reject) => {
+        const req = http.request({ host: '127.0.0.1', port, path: '/seam' }, (res) => {
+          res.resume();
+          res.on('end', () => resolve());
+        });
+        req.on('error', reject);
+        req.end();
+      });
+      expect(seam).toEqual(EXPECTED_SEAM);
+    } finally {
+      server.close();
+    }
+  });
+
+  it('is satisfied by HTTP/2 server request and response objects', async () => {
+    let seam: Record<string, string> | null = null;
+    // Cleartext h2 purely to get real compatibility-API objects without a
+    // certificate; Task 3's client hop is h2 over an already-terminated TLS
+    // socket, which produces the same two classes.
+    const server = http2.createServer((req, res) => {
+      seam = describeSeam(req, res);
+      res.writeHead(204);
+      res.end();
+    });
+    await new Promise<void>((r) => server.listen(0, '127.0.0.1', () => r()));
+    const port = (server.address() as net.AddressInfo).port;
+    const session = http2.connect(`http://127.0.0.1:${port}`);
+
+    try {
+      await new Promise<void>((resolve, reject) => {
+        const stream = session.request({ ':path': '/seam' });
+        stream.on('error', reject);
+        stream.resume();
+        stream.on('end', () => resolve());
+        stream.end();
+      });
+      // One member differs, and it is not cosmetic: `Http2ServerResponse` has no
+      // `destroyed` property at all on Node 22.21.1, even though `@types/node`
+      // types the class as extending `stream.Writable` and so promises one. The
+      // truth lives on `res.stream.destroyed`. Pinned here rather than smoothed
+      // over so that the h2 hop cannot be built on a guard that silently reads
+      // `undefined` — see `DrainableStream` in `stream-utils.ts`.
+      expect(seam).toEqual({ ...EXPECTED_SEAM, 'res.destroyed': 'undefined' });
+    } finally {
+      session.close();
+      server.close();
+    }
+  });
+});
+
+describe('relayResponseHeaders', () => {
+  it('strips only the framing header for an HTTP/1.1 client', () => {
+    // Everything else upstream said is what the client sees today. `connection`
+    // in particular stays: dropping it would turn an upstream `connection: close`
+    // into a kept-alive client connection, which is a behaviour change.
+    expect(
+      relayResponseHeaders({
+        'content-type': 'text/plain',
+        'transfer-encoding': 'chunked',
+        connection: 'close',
+        'keep-alive': 'timeout=5',
+        'set-cookie': ['a=1', 'b=2'],
+      }),
+    ).toEqual({
+      'content-type': 'text/plain',
+      connection: 'close',
+      'keep-alive': 'timeout=5',
+      'set-cookie': ['a=1', 'b=2'],
+    });
+  });
+
+  it('strips every connection-specific header for an HTTP/2 client', () => {
+    // Not cosmetic: `writeHead` on an Http2ServerResponse throws
+    // ERR_HTTP2_INVALID_CONNECTION_HEADERS for any of these, from a place with
+    // no caller to catch it.
+    expect(
+      relayResponseHeaders(
+        {
+          'content-type': 'text/plain',
+          connection: 'keep-alive',
+          'transfer-encoding': 'chunked',
+          'keep-alive': 'timeout=5',
+          'proxy-connection': 'keep-alive',
+          upgrade: 'h2c',
+          'http2-settings': 'AAMAAABkAAQAoAAAAAIAAAAA',
+          te: 'gzip',
+          etag: 'W/"abc"',
+        },
+        'h2',
+      ),
+    ).toEqual({ 'content-type': 'text/plain', etag: 'W/"abc"' });
+  });
+
+  it('keeps a TE of exactly trailers for an HTTP/2 client', () => {
+    expect(relayResponseHeaders({ te: 'trailers' }, 'h2')).toEqual({ te: 'trailers' });
   });
 });
 
