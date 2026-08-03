@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback } from 'react';
-import { fetchRequest, replayWebSocketConnection, formatWsPayload, describeReplayOutcome, useWsMessages } from '../client.ts';
+import { fetchRequest, replayWebSocketConnection, formatWsPayload, describeReplayOutcome, useWsMessages, wireProtocolLabel } from '../client.ts';
 import type { RequestRecord, UiWsMessage, WsReplayResponse } from '../client.ts';
 
 const SKIP_HEADERS = new Set([
@@ -135,6 +135,9 @@ export function RequestDetail({ requestId, onClose, onSendToRepeater }: RequestD
         <span>{record.duration}ms</span>
         <span>{record.response_size}B</span>
         <span>{record.protocol}</span>
+        <span title="client hop → origin hop">
+          {wireProtocolLabel(record.client_protocol)} → {wireProtocolLabel(record.origin_protocol)}
+        </span>
         <span>{new Date(record.timestamp).toLocaleTimeString()}</span>
       </div>
 

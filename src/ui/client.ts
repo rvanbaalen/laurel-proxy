@@ -19,6 +19,16 @@ export interface RequestRecord {
   content_type: string | null;
   truncated: number;
   kind?: 'http' | 'websocket';
+  /**
+   * The wire protocol negotiated with the client/origin respectively —
+   * independent of each other, and independent of `protocol` (the URL
+   * scheme). `null`/absent means genuinely unknown (e.g. a row captured
+   * before this field existed); see `wireProtocolLabel` for the one place
+   * that turns that into display text, and never render it as `'http/1.1'`
+   * directly.
+   */
+  client_protocol?: 'http/1.1' | 'h2' | null;
+  origin_protocol?: 'http/1.1' | 'h2' | null;
 }
 
 export interface ProxyStatus {
@@ -198,6 +208,28 @@ export function parseThrottleInputs(
  */
 export function recordKind(record: { kind?: RequestRecord['kind'] | null }): 'http' | 'websocket' {
   return record.kind === 'websocket' ? 'websocket' : 'http';
+}
+
+/**
+ * Whether a record's client hop negotiated HTTP/2. Exact match only — a
+ * missing/null `client_protocol` must never register as h2 by coincidence of
+ * a loose check, the same "unknown must not read as a definite value" rule
+ * `wireProtocolLabel` follows for display text.
+ */
+export function isH2Client(record: { client_protocol?: RequestRecord['client_protocol'] }): boolean {
+  return record.client_protocol === 'h2';
+}
+
+/**
+ * Human label for a wire-protocol field that may be null/undefined.
+ *
+ * Mirrors the CLI's `wireProtocolLabel` (`src/cli/format.ts`): a hop with no
+ * recorded value must display as `'unknown'`, never silently default to
+ * `'http/1.1'` — that would misrepresent a genuinely unrecorded hop as a
+ * known one, the dominant defect class this feature exists to avoid.
+ */
+export function wireProtocolLabel(value?: 'http/1.1' | 'h2' | null): 'http/1.1' | 'h2' | 'unknown' {
+  return value === 'h2' || value === 'http/1.1' ? value : 'unknown';
 }
 
 export function activePreset(state: ThrottleState | null): string {

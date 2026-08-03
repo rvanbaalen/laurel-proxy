@@ -1,6 +1,6 @@
 import { useState, useMemo, useCallback, useRef } from 'react';
 import { CaretUp, CaretDown, CaretUpDown } from '@phosphor-icons/react';
-import { useThrottle, recordKind } from '../client.ts';
+import { useThrottle, recordKind, isH2Client } from '../client.ts';
 import type { RequestRecord } from '../client.ts';
 
 interface TrafficListProps {
@@ -87,6 +87,16 @@ const renderCell = (req: RequestRecord, key: SortKey) => {
               title="WebSocket connection"
             >
               WS
+            </span>
+          )}
+          {/* Never co-occurs with the WS badge above: a WebSocket connection's
+              client hop is h1.1 by construction (see `websocket.ts`). */}
+          {isH2Client(req) && (
+            <span
+              className="mr-1 px-1 py-px rounded-sm text-[9px] font-bold border bg-purple-400/10 text-purple-400 border-purple-400/20"
+              title="Client negotiated HTTP/2"
+            >
+              H2
             </span>
           )}
           {req.method}

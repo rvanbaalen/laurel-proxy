@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { activePreset, escapeWsControlChars, formatWsPayload, describeReplayOutcome, mergeWsMessages, parseThrottleInputs, recordKind } from './client.ts';
+import { activePreset, escapeWsControlChars, formatWsPayload, describeReplayOutcome, mergeWsMessages, parseThrottleInputs, recordKind, isH2Client, wireProtocolLabel } from './client.ts';
 import type { ThrottleState, WsOpcode, WsReplayResponse, UiWsMessage } from './client.ts';
 
 function b64(s: string): string {
@@ -344,5 +344,34 @@ describe('recordKind', () => {
 
   it('treats an explicit "http" kind as "http"', () => {
     expect(recordKind({ kind: 'http' })).toBe('http');
+  });
+});
+
+describe('isH2Client', () => {
+  it('is true only for the literal client_protocol "h2"', () => {
+    expect(isH2Client({ client_protocol: 'h2' })).toBe(true);
+  });
+
+  it('is false for http/1.1', () => {
+    expect(isH2Client({ client_protocol: 'http/1.1' })).toBe(false);
+  });
+
+  it('is false for a missing or null client_protocol, never true by coincidence', () => {
+    expect(isH2Client({ client_protocol: null })).toBe(false);
+    expect(isH2Client({})).toBe(false);
+  });
+});
+
+describe('wireProtocolLabel', () => {
+  it('passes through a known value unchanged', () => {
+    expect(wireProtocolLabel('h2')).toBe('h2');
+    expect(wireProtocolLabel('http/1.1')).toBe('http/1.1');
+  });
+
+  it('reports "unknown" for a missing or null value, never defaulting to http/1.1', () => {
+    // The dominant defect class this project watches for: an unrecorded hop
+    // must never render as a definite, guessed value.
+    expect(wireProtocolLabel(null)).toBe('unknown');
+    expect(wireProtocolLabel(undefined)).toBe('unknown');
   });
 });
