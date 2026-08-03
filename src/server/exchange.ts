@@ -1,7 +1,7 @@
 import type http from 'node:http';
 import { randomUUID } from 'node:crypto';
 import { URL } from 'node:url';
-import { waitForDrain } from './stream-utils.js';
+import { isGone, waitForDrain } from './stream-utils.js';
 import type { DrainableStream } from './stream-utils.js';
 import { recordSafely } from '../shared/never-fatal.js';
 import { UpstreamTransport } from './upstream.js';
@@ -35,6 +35,25 @@ export interface ExchangeRequest extends AsyncIterable<Buffer> {
   readonly method?: string | undefined;
   readonly url?: string | undefined;
   readonly headers: http.IncomingHttpHeaders;
+  /**
+   * The HTTP/2 stream behind an `Http2ServerRequest`, absent for HTTP/1.1.
+   *
+   * Named here because an h2 request can stop being a request without the body
+   * iteration saying so. `Http2ServerRequest` is a wrapper: when the client sends
+   * `RST_STREAM`, Node's compatibility layer pushes `null` into it, so a
+   * `for await` over a half-received body can simply *finish*. On Node 22.21.1
+   * the async iterator's own premature-close detection does throw for a reset
+   * mid-body, but that is a property of the iterator, not of the request — and it
+   * cannot possibly fire for a body that arrived in full before the client gave
+   * up. `stream.destroyed` is the direct question, and it is the reason a
+   * cancelled h2 stream is never recorded as a completed exchange.
+   *
+   * Deliberately not `aborted`, which both classes do expose: on
+   * `http.IncomingMessage` it is a deprecated getter (DEP0170) that prints a
+   * process warning when touched, and the HTTP/1.1 path must not start emitting
+   * one per request.
+   */
+  readonly stream?: { readonly destroyed: boolean } | undefined;
 }
 
 /**
@@ -53,8 +72,8 @@ export interface ExchangeRequest extends AsyncIterable<Buffer> {
  *
  * The inherited `destroyed` is `boolean | undefined` because an
  * `Http2ServerResponse` genuinely does not have it at runtime — see
- * `DrainableStream`. Treat it as a fast path, never as proof that a response is
- * still writable.
+ * `DrainableStream`. Ask `isGone()` rather than reading it directly; it is the
+ * one place that knows to fall through to `stream.destroyed` for h2.
  */
 export interface ExchangeResponse extends DrainableStream {
   readonly headersSent: boolean;
@@ -88,6 +107,18 @@ export interface ExchangeDeps {
    * {@link sharedUpstream} for what an omitted one falls back to.
    */
   upstream?: UpstreamRequester;
+  /**
+   * The wire protocol negotiated with the **client**, which decides how
+   * upstream's response headers are relayed back — see
+   * {@link relayResponseHeaders}.
+   *
+   * Independent of what the origin speaks: an h2 client in front of an
+   * HTTP/1.1-only origin is a normal case, and the origin's `Connection` and
+   * `Keep-Alive` headers cannot be put on an h2 stream at all. Only the caller
+   * that owns the client socket knows this, so it is passed in rather than
+   * inferred, and omitting it means HTTP/1.1 — every pre-existing call site.
+   */
+  clientProtocol?: NegotiatedProtocol;
 }
 
 let fallbackTransport: UpstreamTransport | null = null;
@@ -232,7 +263,12 @@ export function relayResponseHeaders(
  */
 export function failExchange(clientRes: ExchangeResponse): void {
   try {
-    if (clientRes.writableEnded || clientRes.destroyed) return;
+    // `isGone` rather than `clientRes.destroyed`: on an `Http2ServerResponse`
+    // that property does not exist, so reading it directly made this guard a
+    // no-op for every h2 client — the writes below then threw inside the `catch`
+    // and the guard silently meant nothing. `isGone` consults `res.stream`, where
+    // h2 keeps the answer, so a reset stream is now recognised as one.
+    if (clientRes.writableEnded || isGone(clientRes)) return;
     if (!clientRes.headersSent) {
       clientRes.writeHead(502);
       clientRes.end('Bad Gateway');
@@ -259,6 +295,32 @@ async function readBody(stream: ExchangeRequest): Promise<Buffer> {
   return Buffer.concat(chunks);
 }
 
+/**
+ * Whether an HTTP/2 client has abandoned this exchange.
+ *
+ * `false` for HTTP/1.1, always and by construction: neither
+ * `http.IncomingMessage` nor `http.ServerResponse` has a `stream`, so this
+ * question changes nothing about what an HTTP/1.1 client observes. There, a
+ * client that goes away makes the next `write` throw, and the relay's own `catch`
+ * is what notices.
+ *
+ * HTTP/2 needs asking explicitly because none of the usual signals fire. A
+ * `RST_STREAM` makes Node's compatibility layer push `null` into the request (so
+ * body iteration *ends*, cleanly), while `Http2ServerResponse.writeHead` and
+ * `end` are both silent no-ops on a closed stream. An exchange whose client
+ * cancelled after sending a complete request, against an origin that answers with
+ * no body, therefore produces no error anywhere and an upstream response that
+ * genuinely was complete — and would be recorded as a clean 204 that the client
+ * never saw. Measured on Node 22.21.1.
+ *
+ * Both objects are consulted although they wrap one `ServerHttp2Stream`: which of
+ * the two a caller has to hand differs by call site, and a future change that
+ * gives them different lifetimes should not silently lose the check.
+ */
+function h2ClientGone(clientReq: ExchangeRequest, clientRes: ExchangeResponse): boolean {
+  return clientReq.stream?.destroyed === true || clientRes.stream?.destroyed === true;
+}
+
 export async function handleExchange(
   clientReq: ExchangeRequest,
   clientRes: ExchangeResponse,
@@ -275,8 +337,35 @@ export async function handleExchange(
     return;
   }
 
+  // The client has already gone away, so there is no one to forward this request
+  // on behalf of — and replaying a cancelled POST at the origin buys side effects
+  // nobody asked for. Nothing is written back, because there is nothing left to
+  // write to.
+  //
+  // **Best effort, and only that.** Node destroys a reset h2 stream a tick or two
+  // after the compatibility layer ends the request readable, so a cancel that
+  // lands mid-body is frequently *not* visible here — measured on Node 22.21.1.
+  // The check that actually keeps a cancelled exchange out of the recording is the
+  // identical one before `onRecord`; this one only saves the upstream request when
+  // it happens to be able to. Only reachable for HTTP/2; see {@link h2ClientGone}.
+  if (h2ClientGone(clientReq, clientRes)) return;
+
   const upstreamHeaders: http.OutgoingHttpHeaders = { ...clientReq.headers };
   for (const name of HOP_BY_HOP) delete upstreamHeaders[name];
+  // HTTP/2 request pseudo-headers (`:method`, `:path`, `:scheme`, `:authority`)
+  // arrive as ordinary members of `Http2ServerRequest.headers`, and they are not
+  // headers: forwarding one to an HTTP/1.1 origin makes Node's client throw
+  // `ERR_INVALID_HTTP_TOKEN` on the colon, which failed every h2-client-to-
+  // HTTP/1.1-origin request with a 502 until it was caught. The information they
+  // carry is already in `target` and `clientReq.method`. Stripped here rather
+  // than in the transport because it is true of both upstream protocols —
+  // `toH2RequestHeaders` drops them again for its own reasons, and a client that
+  // smuggles a pseudo-header into an HTTP/1.1 request must not have it relayed
+  // either. The *record* keeps `clientReq.headers` untouched, so the capture
+  // still shows exactly what the client sent.
+  for (const name of Object.keys(upstreamHeaders)) {
+    if (name.startsWith(':')) delete upstreamHeaders[name];
+  }
   // Ask upstream for an uncompressed body so no decompression path is needed.
   delete upstreamHeaders['accept-encoding'];
   if (target.protocol === 'https') upstreamHeaders.host = target.hostname;
@@ -316,7 +405,10 @@ export async function handleExchange(
 
   // The status on the wire is coerced to what a response writer will accept; the
   // record below keeps what upstream actually said. See `sendableStatus`.
-  clientRes.writeHead(sendableStatus(proxyRes.status), relayResponseHeaders(proxyRes.headers));
+  clientRes.writeHead(
+    sendableStatus(proxyRes.status),
+    relayResponseHeaders(proxyRes.headers, deps.clientProtocol),
+  );
 
   const captured: Buffer[] = [];
   let capturedLength = 0;
@@ -349,8 +441,14 @@ export async function handleExchange(
   // if it completed — a partial body with status 200 would be actively
   // misleading for the network failures this proxy exists to diagnose.
   //
-  // Two independent signals, and both are consulted because neither implies the
-  // other. `bodyStatus()` is the transport's own verdict on the response, and it
+  // Three independent signals, and all are consulted because none implies the
+  // others. {@link h2ClientGone} covers the client end: an h2 stream the client
+  // reset produces neither a relay error nor an incomplete upstream body, because
+  // upstream's response really did arrive in full and every write to a closed
+  // `Http2ServerResponse` is a silent no-op. It is checked again here rather than
+  // only before the upstream request because the client is free to give up in
+  // between — which is precisely the window in which every other signal says
+  // success. `bodyStatus()` is the transport's own verdict on the response, and it
   // catches endings a `for await` cannot see: HTTP/2 hands a body that stops
   // early to its consumer as a *clean* end (see `upstream.ts`), so the loop above
   // can finish normally on a body that was cut short. `relayFailed` covers the
@@ -358,7 +456,13 @@ export async function handleExchange(
   // the transport is entitled to say `complete` and the client still got a partial
   // response. Recording only when nothing objected keeps this the strict superset
   // of the previous `streamFailed` check that a no-behaviour-change refactor needs.
-  if (relayFailed || proxyRes.bodyStatus().state !== 'complete') return;
+  if (
+    relayFailed ||
+    h2ClientGone(clientReq, clientRes) ||
+    proxyRes.bodyStatus().state !== 'complete'
+  ) {
+    return;
+  }
 
   // Everything the record is made of is built inside the guard, not passed into
   // it. `handleExchange` is dispatched as `void handleExchange(...)`, so its

@@ -4,6 +4,7 @@ import http2 from 'node:http2';
 import { Readable } from 'node:stream';
 import type net from 'node:net';
 import {
+  failExchange,
   handleExchange,
   relayResponseHeaders,
   resolveHttpTarget,
@@ -97,6 +98,8 @@ function describeSeam(req: ExchangeRequest, res: ExchangeResponse): Record<strin
     'req.url': typeof req.url,
     'req.headers': typeof req.headers,
     'req[asyncIterator]': typeof req[Symbol.asyncIterator],
+    'req.stream': typeof req.stream,
+    'res.stream': typeof res.stream,
     'res.headersSent': typeof res.headersSent,
     'res.writableEnded': typeof res.writableEnded,
     'res.destroyed': typeof res.destroyed,
@@ -114,6 +117,10 @@ const EXPECTED_SEAM: Record<string, string> = {
   'req.url': 'string',
   'req.headers': 'object',
   'req[asyncIterator]': 'function',
+  // Absent on HTTP/1.1, which is what makes every `stream?.destroyed` check in
+  // the pipeline provably h2-only.
+  'req.stream': 'undefined',
+  'res.stream': 'undefined',
   'res.headersSent': 'boolean',
   'res.writableEnded': 'boolean',
   'res.destroyed': 'boolean',
@@ -186,7 +193,14 @@ describe('the exchange pipeline seam', () => {
       // truth lives on `res.stream.destroyed`. Pinned here rather than smoothed
       // over so that the h2 hop cannot be built on a guard that silently reads
       // `undefined` — see `DrainableStream` in `stream-utils.ts`.
-      expect(seam).toEqual({ ...EXPECTED_SEAM, 'res.destroyed': 'undefined' });
+      // …and `stream` is present on both halves, which is where that truth lives
+      // and therefore what every h2-only guard in the pipeline keys off.
+      expect(seam).toEqual({
+        ...EXPECTED_SEAM,
+        'res.destroyed': 'undefined',
+        'req.stream': 'object',
+        'res.stream': 'object',
+      });
     } finally {
       session.close();
       server.close();
@@ -239,6 +253,77 @@ describe('relayResponseHeaders', () => {
 
   it('keeps a TE of exactly trailers for an HTTP/2 client', () => {
     expect(relayResponseHeaders({ te: 'trailers' }, 'h2')).toEqual({ te: 'trailers' });
+  });
+});
+
+/**
+ * A response object with the members `failExchange` reads, recording what it did.
+ *
+ * `destroyed` is settable to `undefined` because that is the only value an
+ * `Http2ServerResponse` ever has for it, and pinning the h2 shape is the point:
+ * the guard used to read that property directly, which made it a no-op for every
+ * h2 client while looking like it worked.
+ */
+function recordingResponse(
+  overrides: Partial<{
+    destroyed: boolean | undefined;
+    stream: { destroyed: boolean };
+    headersSent: boolean;
+    writableEnded: boolean;
+  }> = {},
+): ExchangeResponse & { calls: string[] } {
+  const calls: string[] = [];
+  return {
+    calls,
+    destroyed: undefined,
+    headersSent: false,
+    writableEnded: false,
+    ...overrides,
+    writeHead: (status: number) => calls.push(`writeHead:${status}`),
+    write: () => { calls.push('write'); return true; },
+    end: (data?: string) => calls.push(`end:${data ?? ''}`),
+    destroy: () => calls.push('destroy'),
+    on: () => undefined,
+    off: () => undefined,
+  } as unknown as ExchangeResponse & { calls: string[] };
+}
+
+describe('failExchange', () => {
+  it('answers a live client with a 502', () => {
+    const res = recordingResponse({ destroyed: false });
+    failExchange(res);
+    expect(res.calls).toEqual(['writeHead:502', 'end:Bad Gateway']);
+  });
+
+  it('resets a client whose headers have already gone out', () => {
+    // A status line can no longer be sent, so a reset is the only remaining way
+    // to tell the client the body it is reading will not be completed.
+    const res = recordingResponse({ destroyed: false, headersSent: true });
+    failExchange(res);
+    expect(res.calls).toEqual(['destroy']);
+  });
+
+  it('does nothing for an h2 response whose stream is already destroyed', () => {
+    // The regression this pins: with `clientRes.destroyed` read directly, this
+    // guard was blind for h2 — `destroyed` is `undefined` there — so a reset
+    // stream got a `writeHead`/`end` pair that threw inside the surrounding
+    // `catch`. Harmless, and completely meaningless. `isGone` consults
+    // `res.stream`, where h2 keeps the answer.
+    const res = recordingResponse({ destroyed: undefined, stream: { destroyed: true } });
+    failExchange(res);
+    expect(res.calls).toEqual([]);
+  });
+
+  it('still answers an h2 response whose stream is alive', () => {
+    const res = recordingResponse({ destroyed: undefined, stream: { destroyed: false } });
+    failExchange(res);
+    expect(res.calls).toEqual(['writeHead:502', 'end:Bad Gateway']);
+  });
+
+  it('does nothing for a response that has already ended', () => {
+    const res = recordingResponse({ destroyed: false, writableEnded: true });
+    failExchange(res);
+    expect(res.calls).toEqual([]);
   });
 });
 
