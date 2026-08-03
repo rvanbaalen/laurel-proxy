@@ -4,6 +4,7 @@ import { PassThrough } from 'node:stream';
 import type { Readable } from 'node:stream';
 import { countingBody, fromH2ResponseHeaders, toH2RequestHeaders, UpstreamTransport } from './upstream.js';
 import type { BodyStatus, UpstreamTarget } from './upstream.js';
+import { watchProcessErrors } from '../../tests/helpers/process-errors.js';
 
 const target: UpstreamTarget = {
   hostname: 'example.com',
@@ -183,6 +184,36 @@ describe('countingBody', () => {
     const result = await collect(body);
     expect(result.error).toMatch(/closed after 7 bytes without ending/);
     expect(status.state).toBe('truncated');
+  });
+
+  it('does not end the process when a body fails before anyone has started reading it', async () => {
+    // The window is real and shipped: `handleExchange` resolves the upstream
+    // response, then awaits `throttle.delayLatency()` (tens to hundreds of
+    // milliseconds on `laurel-proxy throttle 3g`) *before* its `for await`. A
+    // truncation inside that window destroys `out` while it has no consumer and
+    // therefore no 'error' listener, and an unhandled 'error' on a stream is an
+    // uncaught exception — which, with nothing in `src/` installing an
+    // `uncaughtException` handler, is the end of the proxy. `dispatchExchange`'s
+    // `.catch()` cannot see it: it is an event, not a rejection.
+    const source = fakeStream();
+    let status: BodyStatus = { state: 'pending' };
+    let body!: Readable;
+
+    const escaped = await watchProcessErrors(async () => {
+      body = countingBody(source, 1000, (s) => {
+        status = s;
+      });
+      source.end('short');
+      // Nobody is iterating `body` yet — this is the deferred consumption.
+      await new Promise((r) => setTimeout(r, 200));
+    });
+
+    expect(escaped).toEqual([]);
+    // And the guard weakens nothing: the late consumer still throws (Node's async
+    // iterator rejects from `stream.errored`) and the verdict is still truncated.
+    const result = await collect(body);
+    expect(result.error).toMatch(/expected 1000 bytes, received 5/);
+    expect(status).toEqual({ state: 'truncated', reason: 'expected 1000 bytes, received 5' });
   });
 
   it('does not report a verified body as truncated when its source closes after ending', async () => {

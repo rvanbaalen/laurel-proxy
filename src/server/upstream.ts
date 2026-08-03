@@ -361,6 +361,25 @@ export function countingBody(
   let received = 0;
   let state: BodyStatus = { state: 'pending' };
 
+  // The recording invariant's blind spot, closed. `fail()` below destroys `out`
+  // with an error, and a stream that emits 'error' with no listener is an
+  // *uncaught exception* — not a rejection — so `dispatchExchange`'s `.catch()`
+  // structurally cannot see it, and nothing in `src/` installs an
+  // `uncaughtException` handler. The window is not theoretical: `handleExchange`
+  // resolves this response, then awaits `throttle.delayLatency()` (tens to
+  // hundreds of milliseconds under `laurel-proxy throttle 3g`) and only then
+  // starts iterating. An origin that resets inside that window used to take the
+  // proxy with it — one uncaught exception per exchange, measured against a real
+  // `node:http2` origin.
+  //
+  // Listening changes nothing else. A consumer that arrives later still throws:
+  // Node's async iterator rejects from `stream.errored`, which is recorded on the
+  // stream itself rather than delivered only to whoever was listening at the time.
+  // `bodyStatus()` still says `truncated`, with the same reason. The HTTP/1.1 path
+  // has had the symmetric listener from the start (`h1Request` attaches
+  // `res.on('error', …)`), which is the only reason it was never exposed to this.
+  out.on('error', () => {});
+
   const complete = () => {
     state = { state: 'complete' };
     onSettled(state);

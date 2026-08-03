@@ -10,6 +10,7 @@ import { randomUUID } from 'node:crypto';
 import { CertificateAuthority } from '../../src/server/ssl.js';
 import { UpstreamTransport } from '../../src/server/upstream.js';
 import type { UpstreamRequestInit, UpstreamResponse } from '../../src/server/upstream.js';
+import { watchProcessErrors } from '../helpers/process-errors.js';
 
 /**
  * Every test here runs against a real `node:http2` (or `node:https`, or
@@ -562,6 +563,26 @@ describe('upstream h2 truncation is never reported as success', () => {
     // A session that died is not left in the pool for the next request.
     await new Promise((r) => setTimeout(r, 20));
     expect(transport.stats().sessions).toBe(0);
+  });
+
+  it('does not end the process when the origin truncates a body nobody is reading yet', async () => {
+    // The shipped window: `handleExchange` resolves the upstream response, awaits
+    // `throttle.delayLatency()` and only then starts its `for await`. A real
+    // origin resetting inside that window used to destroy the body stream while
+    // it had no 'error' listener — one uncaught exception per exchange, and with
+    // no `uncaughtException` handler in `src/`, one dead proxy. No test covered
+    // deferred consumption of an h2 body at all, which is exactly where it lived.
+    let res!: UpstreamResponse;
+    const escaped = await watchProcessErrors(async () => {
+      res = await transport.request(get(port, '/reset-internal'));
+      await new Promise((r) => setTimeout(r, 200));
+    });
+    expect(escaped).toEqual([]);
+
+    // Losing the recording is the acceptable half; hiding the truncation is not.
+    const body = await drain(res);
+    expect(body.error).not.toBeNull();
+    expect((await settledStatus(res)).state).toBe('truncated');
   });
 
   it('rejects rather than resolving when the stream dies before a response', async () => {
