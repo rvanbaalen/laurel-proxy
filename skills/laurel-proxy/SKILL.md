@@ -1,7 +1,7 @@
 ---
 name: laurel-proxy
-description: Use when working with Laurel Proxy, intercepting HTTP/HTTPS traffic, debugging API calls, inspecting network requests, or when the user mentions laurel-proxy, proxy traffic, captured requests, or network debugging. Also use when the user asks to start/stop a proxy, view traffic, configure HTTPS interception, simulate slow/throttled network conditions, or inspect/replay WebSocket connections, or debug why an API call is failing. Trigger even when the user just says "capture traffic", "inspect requests", "what is my app sending", "debug this API", "throttle my network", or "inspect websocket messages".
-version: 1.3.0
+description: Use when working with Laurel Proxy, intercepting HTTP/HTTPS/HTTP2 traffic, debugging API calls, inspecting network requests, or when the user mentions laurel-proxy, proxy traffic, captured requests, or network debugging. Also use when the user asks to start/stop a proxy, view traffic, configure HTTPS interception, simulate slow/throttled network conditions, inspect/replay WebSocket connections, debug HTTP/2 exchanges, or debug why an API call is failing. Trigger even when the user just says "capture traffic", "inspect requests", "what is my app sending", "debug this API", "throttle my network", "inspect websocket messages", or "is this request using http2".
+version: 1.4.0
 ---
 
 # Laurel Proxy
@@ -65,6 +65,8 @@ Query captured requests. Default output is a human-readable table.
 | `--method <method>` | | HTTP method (GET, POST, etc.) |
 | `--search <pattern>` | | Substring match on full URL |
 | `--kind <kind>` | | Filter by traffic kind: `http` or `websocket` |
+| `--client-protocol <p>` | | Filter by client-hop wire protocol: `http/1.1` or `h2` |
+| `--origin-protocol <p>` | | Filter by origin-hop wire protocol: `http/1.1` or `h2` |
 | `--since <time>` | | After timestamp (Unix ms or ISO date) |
 | `--until <time>` | | Before timestamp (Unix ms or ISO date) |
 | `--limit <n>` | `100` | Max results |
@@ -83,6 +85,7 @@ laurel-proxy requests --status 500 --limit 20
 laurel-proxy requests --search "/api/v2" --since "2024-01-15T00:00:00Z"
 laurel-proxy requests --format json --host stripe.com | jq '.data[].url'
 laurel-proxy requests --kind websocket --format agent   # find WebSocket connections
+laurel-proxy requests --client-protocol h2 --origin-protocol http/1.1 --format agent  # mixed-hops h2 exchanges
 ```
 
 ### `laurel-proxy request <id> [options]`
@@ -268,7 +271,7 @@ The detail view has three tabs: **Overview**, **Request**, **Response**.
 | `1` / `2` / `3` | Jump to Overview / Request / Response |
 | `Esc` | Back to request list |
 
-- **Overview** — ID, URL, method, status, duration, protocol, timestamp, request/response sizes
+- **Overview** — ID, URL, method, status, duration, protocol, client/origin wire-protocol hop, timestamp, request/response sizes
 - **Request** — Request headers and body (JSON bodies are pretty-printed)
 - **Response** — Response headers and body (JSON bodies are pretty-printed)
 
@@ -335,6 +338,37 @@ spot them in a mixed traffic list.
   base64-encodes only non-text frames, with an explicit `payload_encoding: 'utf8' |
   'base64'` field saying which. Don't assume one behavior applies to the other surface.
 
+## HTTP/2 Support
+
+The proxy negotiates HTTP/2 with clients and origins independently over the same MITM
+tunnel — no flag, no user decision. ALPN decides each hop on its own, so an h2 client
+talking to an HTTP/1.1-only origin is a normal case, and both hops are visible in the
+recording as `client_protocol` and `origin_protocol` (`'http/1.1'` | `'h2'` | `null`).
+`null` means genuinely unknown — never read as `'http/1.1'`; a client offering no ALPN
+at all lands on `http/1.1`, never a guessed h2.
+
+```bash
+laurel-proxy requests --client-protocol h2 --format agent                       # find h2 exchanges
+laurel-proxy requests --client-protocol h2 --origin-protocol http/1.1 --format agent  # the mixed-hops case
+```
+
+`--format table` tags an h2 client hop with a magenta `H2` in the method column
+(never alongside the `WS` marker — a WebSocket's client hop is always h1.1). The web
+UI does the same in the traffic list, and shows `client hop → origin hop` in the
+request detail panel's meta bar. See [`docs/http2.md`](../../docs/http2.md) for the
+full field reference, migration behavior, and known gaps.
+
+**Known limitations — don't misread these:**
+
+- **WebSockets over HTTP/2 (RFC 8441) are not supported.** An h2 client attempting one
+  fails cleanly (reset stream, or a `405`, or a client-side refusal before a byte
+  leaves) rather than hanging — none of the three is recorded as an exchange.
+- **Cleartext h2c is not supported.**
+- **One class of truncated h2 response is genuinely indistinguishable from a clean
+  end:** a `RST_STREAM(NO_ERROR)` mid-body on a response with no `content-length`.
+  Every other truncation shape (mismatched `content-length`, a non-`NO_ERROR` reset, a
+  client-side cancel) is caught and excluded from the recording.
+
 ### Replay
 
 `POST /api/websocket/replay` (body: `{"requestId": "<id>"}`) reopens the connection and
@@ -363,7 +397,7 @@ Available at `http://127.0.0.1:8081/api` when the proxy is running.
 
 | Endpoint | Method | Description |
 |---|---|---|
-| `/api/requests` | GET | Query requests (same filters as CLI via query params) |
+| `/api/requests` | GET | Query requests (same filters as CLI via query params, incl. `client_protocol`/`origin_protocol`) |
 | `/api/requests/:id` | GET | Full request detail |
 | `/api/requests` | DELETE | Clear all traffic |
 | `/api/status` | GET | Proxy status |
