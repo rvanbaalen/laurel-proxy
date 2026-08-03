@@ -1,4 +1,5 @@
 import http from 'node:http';
+import http2 from 'node:http2';
 import net from 'node:net';
 import tls from 'node:tls';
 import type { Database } from '../storage/db.js';
@@ -17,6 +18,7 @@ import type {
 import { handleWebSocketUpgrade } from './websocket.js';
 import type { WebSocketDeps } from './websocket.js';
 import { UpstreamTransport } from './upstream.js';
+import type { NegotiatedProtocol } from './upstream.js';
 import type { Throttler } from './throttle.js';
 
 export class ProxyServer {
@@ -185,8 +187,9 @@ export class ProxyServer {
     clientReq: ExchangeRequest,
     clientRes: ExchangeResponse,
     target: ExchangeTarget,
+    clientProtocol: NegotiatedProtocol = 'http/1.1',
   ): void {
-    void handleExchange(clientReq, clientRes, target, this.exchangeDeps)
+    void handleExchange(clientReq, clientRes, target, { ...this.exchangeDeps, clientProtocol })
       .catch(() => failExchange(clientRes));
   }
 
@@ -213,28 +216,111 @@ export class ProxyServer {
         isServer: true,
         cert,
         key,
-        ALPNProtocols: ['http/1.1'],
+        // Offer both and let the client pick. ALPN is the mechanism HTTP/2
+        // defines for exactly this question, so there is no flag and no user
+        // decision here. What the *origin* speaks is negotiated separately and
+        // independently — see `upstream.ts`.
+        ALPNProtocols: ['h2', 'http/1.1'],
       });
 
       tlsSocket.on('error', () => {
         clientSocket.destroy();
       });
 
-      const virtualServer = http.createServer((clientReq, clientRes) => {
-        const target = resolveMitmTarget(hostname, port, clientReq.url || '/');
-        this.dispatchExchange(clientReq, clientRes, target);
+      // `secure`, not `secureConnect`: the latter belongs to sockets created by
+      // `tls.connect`. A server-side `TLSSocket` announces a completed handshake
+      // as `secure`, and the handshake is the earliest moment `alpnProtocol` has
+      // a value — which is why the virtual server is now built here rather than
+      // immediately. Nothing is lost by waiting: the socket has no reader until
+      // one of the branches below attaches one, so any application bytes that
+      // arrive first sit in its readable buffer.
+      tlsSocket.once('secure', () => {
+        // Only the exact string means h2. `alpnProtocol` is `false` when the
+        // client offered no ALPN at all (measured on Node 22.21.1; the typings
+        // also allow `null`/`undefined`), and every one of those is an HTTP/1.1
+        // client — never an h2 one, and never a crash.
+        if (tlsSocket.alpnProtocol === 'h2') this.serveH2Tunnel(tlsSocket, hostname, port);
+        else this.serveH1Tunnel(tlsSocket, hostname, port);
       });
-
-      // wss:// arrives as an upgrade request inside the tunnel, so the virtual
-      // server needs the same dispatch as the plain listener.
-      virtualServer.on('upgrade', (clientReq, socket: net.Socket, upgradeHead: Buffer) => {
-        const target = resolveMitmTarget(hostname, port, clientReq.url || '/');
-        handleWebSocketUpgrade(clientReq, socket, upgradeHead, target, this.webSocketDeps);
-      });
-
-      virtualServer.emit('connection', tlsSocket);
     } catch {
       clientSocket.end();
     }
+  }
+
+  /**
+   * The HTTP/1.1 half of a MITM tunnel, unchanged from before ALPN offered a
+   * choice: a throwaway `http.Server` that is never listening, fed the decrypted
+   * socket through `emit('connection')`.
+   *
+   * One server per CONNECT is wasteful — it is a fresh object graph per tunnel —
+   * but it is what shipped and it works, and sharing one across tunnels would
+   * mean sharing its `upgrade` handler too, which is where the per-tunnel
+   * hostname and port live. Noted rather than optimised.
+   */
+  private serveH1Tunnel(tlsSocket: tls.TLSSocket, hostname: string, port: number): void {
+    const virtualServer = http.createServer((clientReq, clientRes) => {
+      const target = resolveMitmTarget(hostname, port, clientReq.url || '/');
+      this.dispatchExchange(clientReq, clientRes, target);
+    });
+
+    // wss:// arrives as an upgrade request inside the tunnel, so the virtual
+    // server needs the same dispatch as the plain listener.
+    virtualServer.on('upgrade', (clientReq, socket: net.Socket, upgradeHead: Buffer) => {
+      const target = resolveMitmTarget(hostname, port, clientReq.url || '/');
+      handleWebSocketUpgrade(clientReq, socket, upgradeHead, target, this.webSocketDeps);
+    });
+
+    virtualServer.emit('connection', tlsSocket);
+  }
+
+  /**
+   * The HTTP/2 half: the same throwaway-virtual-server trick, with
+   * `http2.createServer` rather than `http2.createSecureServer` because this
+   * socket's TLS is already terminated. Requests reach the shared pipeline
+   * through Node's compatibility API, whose `Http2ServerRequest`/
+   * `Http2ServerResponse` satisfy `ExchangeRequest`/`ExchangeResponse`
+   * structurally — that is what Task 2's seam bought.
+   *
+   * Same per-CONNECT cost as {@link serveH1Tunnel}, and the same verdict: an h2
+   * server per tunnel is acceptable for now, and it is at least amortised over
+   * every stream multiplexed on the connection rather than over one request.
+   *
+   * **WebSockets over h2 (RFC 8441) are deliberately not supported**, and both
+   * ways a client can ask for them fail cleanly rather than hanging. Extended
+   * CONNECT requires the server to advertise `SETTINGS_ENABLE_CONNECT_PROTOCOL`,
+   * which `http2.createServer` does not by default, so a `:protocol` stream is
+   * rejected with `RST_STREAM(PROTOCOL_ERROR)`. A plain `CONNECT` stream is
+   * answered `405 Method Not Allowed` by the compatibility layer, precisely
+   * because no `connect` listener is registered below — its absence is load
+   * bearing. (An `Upgrade` header never gets that far: HTTP/2 forbids it, and a
+   * client's own `session.request` throws on it.) The `Upgrade`-based capture in
+   * {@link serveH1Tunnel} is untouched and still the way wss:// is recorded.
+   */
+  private serveH2Tunnel(tlsSocket: tls.TLSSocket, hostname: string, port: number): void {
+    // `Http2Session` will not set up its handle while it believes TLS is still in
+    // progress, and what it then waits for is `secureConnect` — an event a
+    // server-side socket never emits. `secureConnecting` is left `true` forever on
+    // a hand-built server `TLSSocket`: `tls.Server` is what normally clears it,
+    // in `onServerSocketSecure`, just before handing the finished socket to its
+    // `secureConnection` listeners. We are standing in for that listener, so we
+    // have to stand in for that line too. Measured on Node 22.21.1 — without it
+    // the session never starts and every request on the tunnel hangs forever,
+    // with no error anywhere.
+    (tlsSocket as unknown as { secureConnecting: boolean }).secureConnecting = false;
+
+    const virtualServer = http2.createServer();
+    virtualServer.on('request', (clientReq, clientRes) => {
+      const target = resolveMitmTarget(hostname, port, clientReq.url || '/');
+      this.dispatchExchange(clientReq, clientRes, target, 'h2');
+    });
+
+    // A dead session is a dead tunnel; there is nothing to salvage and nothing to
+    // tell the client, since the channel for telling it is what failed. Both
+    // listeners exist mainly so a session-level failure cannot become an
+    // unhandled 'error' event, which would end the process.
+    virtualServer.on('sessionError', () => tlsSocket.destroy());
+    virtualServer.on('error', () => tlsSocket.destroy());
+
+    virtualServer.emit('connection', tlsSocket);
   }
 }
