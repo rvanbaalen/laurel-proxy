@@ -101,6 +101,17 @@ record (see "Not supported" below).
 - **Cleartext h2c** (prior-knowledge or `Upgrade`-based). Rare in practice —
   browsers don't do it — and out of scope.
 - **HTTP/3 / QUIC**, and server push (deprecated, unimplemented in browsers).
+- **Response trailers are dropped, on both hops.** An origin's trailing
+  headers reach neither the client nor the recording — an h2 origin's
+  `sendTrailers`, and an HTTP/1.1 origin's chunked trailer block alike. This
+  is not new (HTTP/1.1 always dropped them here) and it is deliberate:
+  recording them means a new `RequestRecord` field, a guarded migration and a
+  route to the CLI/REST/UI surfaces, and relaying them would change the bytes
+  an application sees. What *is* guaranteed is that dropping them is clean: a
+  trailer is never merged into the recorded response headers, so a trailer
+  named like a header cannot overwrite what the origin actually sent, and the
+  body is unaffected. If you need to see trailers, they are on the wire — this
+  proxy simply does not capture them.
 
 ## Known gaps, documented rather than hidden
 

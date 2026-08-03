@@ -364,6 +364,11 @@ full field reference, migration behavior, and known gaps.
   fails cleanly (reset stream, or a `405`, or a client-side refusal before a byte
   leaves) rather than hanging — none of the three is recorded as an exchange.
 - **Cleartext h2c is not supported.**
+- **Response trailers are dropped on both hops** — an origin's trailing headers reach
+  neither the client nor the recording, for h2 and HTTP/1.1 alike. Don't read an
+  absent trailer as an origin that sent none. Trailers are never merged into the
+  recorded response headers, so a recorded header block is always what the origin
+  actually sent in its header block.
 - **One class of truncated h2 response is genuinely indistinguishable from a clean
   end:** a `RST_STREAM(NO_ERROR)` mid-body on a response with no `content-length`.
   Every other truncation shape (mismatched `content-length`, a non-`NO_ERROR` reset, a

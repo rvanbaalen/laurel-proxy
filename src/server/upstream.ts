@@ -58,6 +58,27 @@ import type { Readable } from 'node:stream';
  * (Note that Node's *server* `stream.close(code)` is not this case: it ends the
  * writable side first, so a peer receives a complete message and then a reset.
  * A test that wants a real mid-response reset must use `stream.destroy(err)`.)
+ *
+ * ## Response trailers are dropped, deliberately
+ *
+ * {@link UpstreamResponse} used to carry a `trailers()` accessor, implemented for
+ * both protocols and consumed by **nothing**: trailers reached neither the client
+ * nor the recording. Rather than leave dead API surface implying a fidelity this
+ * proxy does not have, they are dropped explicitly and the gap is stated in
+ * `docs/http2.md` and `skills/laurel-proxy/SKILL.md`.
+ *
+ * Recording them is the bigger of the two changes, not the smaller: a trailer
+ * block is a second header set, so it needs a `RequestRecord` field, a guarded
+ * migration and a route to the CLI/REST/UI surfaces — otherwise it repeats the
+ * `kind` column that shipped without ever reaching the agent surface. Relaying
+ * them instead would alter the bytes an application sees, since an HTTP/1.1 client
+ * only consents to trailers via `TE: trailers`. HTTP/1.1 has always dropped them
+ * here, so nothing regresses either way.
+ *
+ * What is *not* dropped is the guarantee that a trailer cannot corrupt a
+ * recording: trailers were never merged into `headers`, so a trailer named like a
+ * header cannot overwrite what the origin actually sent in its header block. A
+ * test against a real trailer-sending origin pins that.
  */
 
 /** The wire protocol negotiated with the origin. Not the URL scheme. */
@@ -103,8 +124,6 @@ export interface UpstreamResponse {
   headers: http.IncomingHttpHeaders;
   /** Async-iterable `Buffer` stream that errors on any abnormal termination. */
   body: Readable;
-  /** Trailing headers, empty until the body ends. Never merged into `headers`. */
-  trailers(): http.IncomingHttpHeaders;
   bodyStatus(): BodyStatus;
 }
 
@@ -289,16 +308,6 @@ export function fromH2ResponseHeaders(headers: http2.IncomingHttpHeaders): {
   const raw = headers[':status'];
   const status = raw === undefined ? undefined : Number(raw);
   return { status: status === undefined || Number.isNaN(status) ? undefined : status, headers: out };
-}
-
-/** Trailing headers with pseudo-headers dropped, matching `fromH2ResponseHeaders`. */
-function cleanTrailers(headers: http2.IncomingHttpHeaders): http.IncomingHttpHeaders {
-  const out: http.IncomingHttpHeaders = {};
-  for (const [name, value] of Object.entries(headers)) {
-    if (name.startsWith(':')) continue;
-    out[name] = value;
-  }
-  return out;
 }
 
 /**
@@ -574,7 +583,6 @@ export class UpstreamTransport {
       status: res.statusCode,
       headers: res.headers,
       body: res,
-      trailers: () => res.trailers ?? {},
       bodyStatus: () => {
         if (failure !== null) return { state: 'truncated', reason: failure };
         if (!res.readableEnded && !res.destroyed) return { state: 'pending' };
@@ -744,14 +752,6 @@ export class UpstreamTransport {
         }
       });
 
-      let trailers: http.IncomingHttpHeaders = {};
-      stream.once('trailers', (raw: http2.IncomingHttpHeaders) => {
-        // Surfaced, never merged into `headers`: a trailer named like a header
-        // would otherwise overwrite what the origin actually sent in the header
-        // block, and the recording would misreport the response.
-        trailers = cleanTrailers(raw);
-      });
-
       stream.once('response', (raw: http2.IncomingHttpHeaders) => {
         const { status, headers: resHeaders } = fromH2ResponseHeaders(raw);
         let bodyState: BodyStatus = { state: 'pending' };
@@ -765,7 +765,6 @@ export class UpstreamTransport {
           status,
           headers: resHeaders,
           body: bodyStream,
-          trailers: () => trailers,
           bodyStatus: () => bodyState,
         });
       });

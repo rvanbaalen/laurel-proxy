@@ -222,15 +222,19 @@ describe('upstream h2 happy path', () => {
     expect(await settledStatus(res)).toEqual({ state: 'complete' });
   });
 
-  it('surfaces trailers separately instead of merging them into headers', async () => {
+  it('drops trailers rather than merging them into the response headers', async () => {
+    // Trailers are deliberately not surfaced at all — see the module docs in
+    // `src/server/upstream.ts` and the documented gap in `docs/http2.md`. What
+    // this pins is that dropping them is *clean*: a trailer named like a header
+    // cannot overwrite what the origin sent in its header block, so the recording
+    // never misreports the response, and the body is unaffected either way.
     const res = await transport.request(get(port, '/trailers'));
     const body = await drain(res);
     expect(body.text).toBe('trailing');
-    await settledStatus(res);
+    expect(await settledStatus(res)).toEqual({ state: 'complete' });
     expect(res.headers['x-real']).toBe('header');
-    expect(res.trailers()['x-real']).toBe('trailer-wins-if-merged');
-    expect(res.trailers()['x-trailer-only']).toBe('yes');
     expect(res.headers['x-trailer-only']).toBeUndefined();
+    expect('trailers' in res).toBe(false);
   });
 
   it('does not call a bodyless response truncated for its content-length', async () => {

@@ -496,7 +496,6 @@ function stubUpstream(
       status: 200,
       headers: { 'content-type': 'text/plain' },
       body: Readable.from([Buffer.from(body)]),
-      trailers: () => ({}),
       bodyStatus: () => bodyStatus,
     }),
   };
