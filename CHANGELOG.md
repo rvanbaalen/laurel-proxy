@@ -1,5 +1,75 @@
 # Changelog
 
+## [0.3.0](https://github.com/rvanbaalen/laurelproxy/compare/laurel-proxy-v0.2.2...laurel-proxy-v0.3.0) (2026-08-03)
+
+
+### ⚠ BREAKING CHANGES
+
+* **server:** drop the unused upstream trailers API
+
+### Features
+
+* add `laurel-proxy learn` command ([a4d913a](https://github.com/rvanbaalen/laurelproxy/commit/a4d913a714b4ca1a8959d3a446b31e024771224d))
+* add bandwidth rate limiter with network presets ([84f8115](https://github.com/rvanbaalen/laurelproxy/commit/84f811598f4ba1ffd2415fdbdc776e660489f843))
+* add laurel-proxy messages command ([15589b1](https://github.com/rvanbaalen/laurelproxy/commit/15589b1efa43cffd350b1146120a828d08551cc8))
+* add laurel-proxy throttle command ([307b732](https://github.com/rvanbaalen/laurelproxy/commit/307b732e6055fff4a2ccb8e2df7dbcd25c7ae758))
+* add RFC 6455 WebSocket frame decoder ([5ef9a20](https://github.com/rvanbaalen/laurelproxy/commit/5ef9a206ff31232a057cf94302ef596dee223cbd))
+* add throttle configuration REST endpoints ([d081d59](https://github.com/rvanbaalen/laurelproxy/commit/d081d59448e064026db7ed2d7d4dcc262414ce59))
+* add throttle control to web UI ([a6029cb](https://github.com/rvanbaalen/laurelproxy/commit/a6029cb088f48dd03ef40594f225eefa7d8c6e82))
+* add WebSocket connection replay ([df93281](https://github.com/rvanbaalen/laurelproxy/commit/df9328133fb7b0d1fa6e7d023e6d1e24be2a306e))
+* add websocket message storage with kind column migration ([79340bc](https://github.com/rvanbaalen/laurelproxy/commit/79340bc1d2866ff1884d8609982b0f910e46396c))
+* add WebSocket messages tab to web UI ([a9f92f6](https://github.com/rvanbaalen/laurelproxy/commit/a9f92f65aa52c1f1ff05924fc885ad2a67fe6b21))
+* **api:** add client_protocol/origin_protocol query filters to GET /api/requests ([c22396b](https://github.com/rvanbaalen/laurelproxy/commit/c22396b3c2596ef85d62a40f78e58f5eac75128e))
+* apply bandwidth throttling and latency to proxied exchanges ([1a3a046](https://github.com/rvanbaalen/laurelproxy/commit/1a3a046a2a2d9500ebb8bd3859692fc80c675b53))
+* capture WebSocket traffic through the proxy ([60f0acc](https://github.com/rvanbaalen/laurelproxy/commit/60f0acce30d3357d10e43c2041afebfa70e77071))
+* **cli:** surface client/origin wire protocol in requests, request, and --tail ([623cbe6](https://github.com/rvanbaalen/laurelproxy/commit/623cbe6cbdf30e188fc435fb9de7875ee28b29b0))
+* **cli:** surface request kind on the agent and table surfaces, and add --kind ([d60d527](https://github.com/rvanbaalen/laurelproxy/commit/d60d527148403198e89078fc1b65115a019e4c6c))
+* expose websocket messages via REST and SSE ([0c83f55](https://github.com/rvanbaalen/laurelproxy/commit/0c83f558556f69a9780dba1e618e57bb78a99501))
+* **server:** add upstream transport with HTTP/2 support ([c27998a](https://github.com/rvanbaalen/laurelproxy/commit/c27998afcbad8997c9d4755698e28937a29a0529))
+* **server:** negotiate HTTP/2 with clients over the MITM tunnel ([3d5f7b7](https://github.com/rvanbaalen/laurelproxy/commit/3d5f7b77b60c732e600e9391c0d3d967c7736a2e))
+* **server:** teach the exchange pipeline what an HTTP/2 client needs ([0939cee](https://github.com/rvanbaalen/laurelproxy/commit/0939ceed2bafaeadee68acb6192b62d201ba13ee))
+* **server:** thread client_protocol/origin_protocol into every record site ([c628bd3](https://github.com/rvanbaalen/laurelproxy/commit/c628bd34bb7c4914dee0430b608eaa4862bab527))
+* **storage:** record the negotiated wire protocol for both hops ([e56b4d7](https://github.com/rvanbaalen/laurelproxy/commit/e56b4d7949e0216b22f1982c3aa455bba8589790))
+* **ui:** add custom throttle rate popover to the toolbar ([5b28a6a](https://github.com/rvanbaalen/laurelproxy/commit/5b28a6a5e65b53d129e7bba536fc592b856139bc))
+* **ui:** filter by kind and mark WebSocket rows in the traffic list ([b88347f](https://github.com/rvanbaalen/laurelproxy/commit/b88347f464fbdc53633f91acfac9d3be67a1b61c))
+* **ui:** show client/origin wire protocol in the traffic list and detail panel ([ef23adc](https://github.com/rvanbaalen/laurelproxy/commit/ef23adcc64a29e32661c6a26e695cd6b78acebfe))
+
+
+### Bug Fixes
+
+* accept --format agent on laurel-proxy throttle ([7af8363](https://github.com/rvanbaalen/laurelproxy/commit/7af8363ecc695017f646b24995aa32f7027dc03c))
+* **cli:** align the Client Hop and Origin Hop meta rows ([009c05f](https://github.com/rvanbaalen/laurelproxy/commit/009c05fe684ffb5bd5abf13a4967ebefcd1ea949))
+* **cli:** stop websocket message output presenting a page as the whole collection ([66a846c](https://github.com/rvanbaalen/laurelproxy/commit/66a846cda10510273403f02a4c5b455951d774e9))
+* correct repository URL to unscoped laurelproxy (no hyphen) ([3f81dcd](https://github.com/rvanbaalen/laurelproxy/commit/3f81dcdcf4df4624d093c9ff81614280c75352cd))
+* don't drop live WS frames on a fetch/SSE race in useWsMessages ([4553875](https://github.com/rvanbaalen/laurelproxy/commit/4553875f0eaffb9ecd16ec99d99af7a04ffd2ed3))
+* don't misreport unknown throttle state as disabled ([4cbc3c3](https://github.com/rvanbaalen/laurelproxy/commit/4cbc3c31fd26075b4e2234c12d77f11d43477717))
+* guard against unbounded-rate rounding and strengthen concurrency test ([d38110b](https://github.com/rvanbaalen/laurelproxy/commit/d38110b15681b381a98ff5e0da7c4acbb86357f3))
+* keep the port in recorded HTTPS URLs ([d277072](https://github.com/rvanbaalen/laurelproxy/commit/d2770726c50ac238be5f07b19fb61bc93625d6f4))
+* let Node re-chunk streamed responses instead of forcing connection close ([556b864](https://github.com/rvanbaalen/laurelproxy/commit/556b8648544d11ef04de31b6e6ccd13b8c287521))
+* persist throttle settings before applying to the live throttler ([781a028](https://github.com/rvanbaalen/laurelproxy/commit/781a02806fac0aba79b72991c313d1d119105c12))
+* preserve query string in recorded path, don't record failed exchanges ([c897d91](https://github.com/rvanbaalen/laurelproxy/commit/c897d91111f7855b0610dd6b86594d3062274e53))
+* refuse to replay truncated frames, and say why a replay stopped ([77723d4](https://github.com/rvanbaalen/laurelproxy/commit/77723d434b7af31996aa9c3339a48154a5e25203))
+* regenerate assets with Laurel Proxy branding ([a02c384](https://github.com/rvanbaalen/laurelproxy/commit/a02c3846db180316389df5956ee06b271014ba84))
+* **server:** ask whether an HTTP/1.1 body is complete before why it failed ([5f97f20](https://github.com/rvanbaalen/laurelproxy/commit/5f97f2033fb3a5e6b6a9376a0119e17cde97b83e))
+* **server:** bound a stalled MITM handshake and guard the h2 socket poke ([c052e05](https://github.com/rvanbaalen/laurelproxy/commit/c052e05ebc47e08ee1116445e10d83dd0e8c46cf))
+* **server:** keep an HTTP/2 truncation from ending the process ([4490245](https://github.com/rvanbaalen/laurelproxy/commit/4490245362ec29bea80e80ec7920b0809e70f959))
+* **server:** make sendableStatus HTTP/2-aware ([b0b6e67](https://github.com/rvanbaalen/laurelproxy/commit/b0b6e673b49a29df100792962ad7a7679d037992))
+* **server:** make the destroyed check meaningful for HTTP/2 responses ([7e3542d](https://github.com/rvanbaalen/laurelproxy/commit/7e3542d58f300ffa6d333a333bbc24536d8780e0))
+* **server:** never let a recording failure kill the proxy or a transfer ([89dc07e](https://github.com/rvanbaalen/laurelproxy/commit/89dc07e9a113d81c309cac4b64741fcee6f04c6f))
+* **server:** report a WebSocket replay that stopped before sending everything ([9617763](https://github.com/rvanbaalen/laurelproxy/commit/96177636126ec78d2b2fab7a579536005f2ef316))
+* **server:** share cold-start ALPN probes and h2 handshakes ([330c580](https://github.com/rvanbaalen/laurelproxy/commit/330c5809f9ce7599952a7bf0ae4c3f9215dc0c4b))
+* **server:** stop an unsendable upstream status and pipeline throws from killing the proxy ([ca5d475](https://github.com/rvanbaalen/laurelproxy/commit/ca5d4754693e714f6ca4a8cd6a17a3ecf08a0bdb))
+* **server:** validate the config file's throttle block instead of trusting it ([34cca71](https://github.com/rvanbaalen/laurelproxy/commit/34cca71449da03f0b13edb0ad8779ad9fd275783))
+* stop recording failures from tearing down relayed connections ([4325253](https://github.com/rvanbaalen/laurelproxy/commit/4325253129d22ecb6efeac381b697e1d1a162edc))
+* **storage:** keep a failing retention pass from killing the proxy ([f7b930d](https://github.com/rvanbaalen/laurelproxy/commit/f7b930d50483d3e0324a58d21dc1145b21e4107f))
+* **storage:** reclaim orphaned websocket messages; rename guard to neverFatal ([4ffa596](https://github.com/rvanbaalen/laurelproxy/commit/4ffa5963064dcca74e9e310dd8a29b415188cf45))
+* **ui:** let the sliders button close the throttle popover it opened ([69ed0ff](https://github.com/rvanbaalen/laurelproxy/commit/69ed0ffa0bbbbc6d6b1938cedaf2954a8d69e8d9))
+
+
+### Code Refactoring
+
+* **server:** drop the unused upstream trailers API ([5d54e03](https://github.com/rvanbaalen/laurelproxy/commit/5d54e036c4a1c4a9892e1e34e1dde76775f57191))
+
 ## [0.2.2](https://github.com/rvanbaalen/laurelproxy/compare/laurel-proxy-v0.2.1...laurel-proxy-v0.2.2) (2026-03-28)
 
 

@@ -1,6 +1,6 @@
 {
   "name": "laurel-proxy",
-  "version": "0.2.2",
+  "version": "0.3.0",
   "description": "HTTP/HTTPS intercepting proxy with CLI and web UI",
   "type": "module",
   "bin": {
