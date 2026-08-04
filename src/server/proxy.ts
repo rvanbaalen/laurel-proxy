@@ -24,14 +24,12 @@ import type { Throttler } from './throttle.js';
 /**
  * Cap on a MITM TLS handshake, after which the tunnel socket is destroyed.
  *
- * There used to be one for free. When the virtual `http.Server` was created
- * immediately and handed the socket before the handshake, its `headersTimeout`
- * (60s in Node 22) covered a client that connected and then sent nothing.
- * Building the virtual server inside the `'secure'` handler — which ALPN requires,
- * since `alpnProtocol` has no value before then — moved the handshake outside any
- * server's timeouts, so a client could hold a CONNECT socket, and the certificate
- * generated for it, indefinitely. This restores the bound at the same 60s, which
- * is generous for a handshake and matches what the HTTP/1.1 path used to enforce.
+ * The virtual `http.Server` that would otherwise enforce a `headersTimeout`
+ * isn't built until inside the `'secure'` handler, since ALPN gives
+ * `alpnProtocol` no value before then — so nothing else bounds a client that
+ * holds a CONNECT socket, and the certificate generated for it, open without
+ * ever completing TLS. 60s matches Node's own `headersTimeout` default, which
+ * is generous for a handshake.
  */
 export const MITM_HANDSHAKE_TIMEOUT_MS = 60_000;
 
@@ -76,12 +74,12 @@ export function markHandshakeComplete(socket: object): boolean {
 export class ProxyServer {
   private server: http.Server | null = null;
   /**
-   * Owned here rather than per exchange because it is a cache and a connection
-   * pool: an h2 session is worth reusing across requests to the same origin, and
-   * an ALPN verdict is worth remembering. Its lifetime therefore has to match the
-   * server's, which is why it is created in `start` and closed in `stop` like
-   * `server` and `sockets` — an unclosed pool holds sockets, and this process is
-   * a CLI that has to be able to exit.
+   * Owned here, not per exchange: a connection pool and ALPN-verdict cache worth reusing across requests to the same origin.
+   *
+   * Its lifetime has to match the server's, which is why it is created in
+   * `start` and closed in `stop` alongside `server` and `sockets` — an
+   * unclosed pool holds sockets open, and this process is a CLI that has to
+   * be able to exit.
    */
   private upstream: UpstreamTransport | null = null;
   private sockets: Set<net.Socket> = new Set();
@@ -127,9 +125,8 @@ export class ProxyServer {
       this.writeTimer = null;
     }
     this.flushWrites();
-    // Before the client sockets, and unconditionally: pooled h2 sessions are
-    // upstream sockets nothing else in this class knows about, and leaving them
-    // open keeps the event loop alive after `stop()` resolves.
+    // Closed before the client sockets: an open pooled h2 session is an
+    // upstream socket that would otherwise keep the event loop alive.
     if (this.upstream) {
       this.upstream.close();
       this.upstream = null;
@@ -159,10 +156,9 @@ export class ProxyServer {
   }
 
   /**
-   * Requests are flushed before frames: a WebSocket connection's row is always
-   * queued before any of its frames, so **as long as the request insert
-   * succeeds**, draining in this order means a reader can never find a frame
-   * whose parent row has not landed yet.
+   * Requests are flushed before frames: a WebSocket connection row is always
+   * queued before its frames, so as long as the request insert succeeds, a
+   * reader can never see a frame before its parent row has landed.
    *
    * This runs from a `setInterval`, where an escaping throw is an uncaught
    * exception and therefore the end of the process — and it is the one recording
@@ -269,10 +265,7 @@ export class ProxyServer {
         isServer: true,
         cert,
         key,
-        // Offer both and let the client pick. ALPN is the mechanism HTTP/2
-        // defines for exactly this question, so there is no flag and no user
-        // decision here. What the *origin* speaks is negotiated separately and
-        // independently — see `upstream.ts`.
+        // Client protocol only; the origin's is negotiated separately, see `upstream.ts`.
         ALPNProtocols: ['h2', 'http/1.1'],
       });
 
@@ -280,10 +273,7 @@ export class ProxyServer {
         clientSocket.destroy();
       });
 
-      // Bound the handshake itself — see MITM_HANDSHAKE_TIMEOUT_MS. Nothing else
-      // is watching this window any more: the virtual server that used to enforce
-      // `headersTimeout` here is now built inside the `'secure'` handler below,
-      // because ALPN cannot be read before then.
+      // See MITM_HANDSHAKE_TIMEOUT_MS: nothing else bounds this window.
       const handshakeTimer = setTimeout(() => {
         clientSocket.destroy();
       }, this.options.mitmHandshakeTimeoutMs ?? MITM_HANDSHAKE_TIMEOUT_MS);
@@ -294,18 +284,11 @@ export class ProxyServer {
       tlsSocket.once('close', clearHandshakeTimer);
       clientSocket.once('close', clearHandshakeTimer);
 
-      // `secure`, not `secureConnect`: the latter belongs to sockets created by
-      // `tls.connect`. A server-side `TLSSocket` announces a completed handshake
-      // as `secure`, and the handshake is the earliest moment `alpnProtocol` has
-      // a value — which is why the virtual server is now built here rather than
-      // immediately. Nothing is lost by waiting: the socket has no reader until
-      // one of the branches below attaches one, so any application bytes that
-      // arrive first sit in its readable buffer.
+      // `secure` (not `secureConnect`, client-side only) is the earliest point
+      // `alpnProtocol` is set; unread bytes just sit in the socket's buffer.
       tlsSocket.once('secure', () => {
-        // Only the exact string means h2. `alpnProtocol` is `false` when the
-        // client offered no ALPN at all (measured on Node 22.21.1; the typings
-        // also allow `null`/`undefined`), and every one of those is an HTTP/1.1
-        // client — never an h2 one, and never a crash.
+        // Exact match only: `alpnProtocol` is `false`/`null`/`undefined` when
+        // ALPN wasn't offered, and all of those mean HTTP/1.1, never h2.
         if (tlsSocket.alpnProtocol === 'h2') this.serveH2Tunnel(tlsSocket, hostname, port);
         else this.serveH1Tunnel(tlsSocket, hostname, port);
       });
@@ -315,14 +298,13 @@ export class ProxyServer {
   }
 
   /**
-   * The HTTP/1.1 half of a MITM tunnel, unchanged from before ALPN offered a
-   * choice: a throwaway `http.Server` that is never listening, fed the decrypted
-   * socket through `emit('connection')`.
+   * The HTTP/1.1 half of a MITM tunnel: a throwaway `http.Server`, never
+   * listening, fed the decrypted socket via `emit('connection')`.
    *
-   * One server per CONNECT is wasteful — it is a fresh object graph per tunnel —
-   * but it is what shipped and it works, and sharing one across tunnels would
-   * mean sharing its `upgrade` handler too, which is where the per-tunnel
-   * hostname and port live. Noted rather than optimised.
+   * One server per CONNECT is wasteful — a fresh object graph per tunnel —
+   * but sharing one across tunnels would mean sharing its `upgrade` handler
+   * too, which is where the per-tunnel hostname and port live. Noted rather
+   * than optimised.
    */
   private serveH1Tunnel(tlsSocket: tls.TLSSocket, hostname: string, port: number): void {
     const virtualServer = http.createServer((clientReq, clientRes) => {
@@ -341,12 +323,12 @@ export class ProxyServer {
   }
 
   /**
-   * The HTTP/2 half: the same throwaway-virtual-server trick, with
-   * `http2.createServer` rather than `http2.createSecureServer` because this
-   * socket's TLS is already terminated. Requests reach the shared pipeline
-   * through Node's compatibility API, whose `Http2ServerRequest`/
-   * `Http2ServerResponse` satisfy `ExchangeRequest`/`ExchangeResponse`
-   * structurally — that is what Task 2's seam bought.
+   * The HTTP/2 half: the same throwaway-virtual-server trick, but using
+   * `http2.createServer` — this socket's TLS is already terminated.
+   *
+   * Requests reach the shared pipeline through Node's compatibility API,
+   * whose `Http2ServerRequest`/`Http2ServerResponse` satisfy
+   * `ExchangeRequest`/`ExchangeResponse` structurally.
    *
    * Same per-CONNECT cost as {@link serveH1Tunnel}, and the same verdict: an h2
    * server per tunnel is acceptable for now, and it is at least amortised over
@@ -364,11 +346,8 @@ export class ProxyServer {
    * {@link serveH1Tunnel} is untouched and still the way wss:// is recorded.
    */
   private serveH2Tunnel(tlsSocket: tls.TLSSocket, hostname: string, port: number): void {
-    // See `markHandshakeComplete` for what this stands in for and why. If the
-    // field it pokes ever stops existing, the tunnel is failed here rather than
-    // left to hang: an h2 session that never starts produces no error anywhere,
-    // and a proxy whose HTTPS requests silently never answer is far harder to
-    // diagnose from a bug report than one that closes the connection.
+    // See `markHandshakeComplete`: if the field it pokes disappears, fail loudly
+    // here rather than leave a session that never starts and never errors.
     if (!markHandshakeComplete(tlsSocket)) {
       tlsSocket.destroy(
         new Error(
@@ -385,10 +364,8 @@ export class ProxyServer {
       this.dispatchExchange(clientReq, clientRes, target, 'h2');
     });
 
-    // A dead session is a dead tunnel; there is nothing to salvage and nothing to
-    // tell the client, since the channel for telling it is what failed. Both
-    // listeners exist mainly so a session-level failure cannot become an
-    // unhandled 'error' event, which would end the process.
+    // Both listeners exist so a session failure can't surface as an unhandled
+    // 'error' event, which would crash the process.
     virtualServer.on('sessionError', () => tlsSocket.destroy());
     virtualServer.on('error', () => tlsSocket.destroy());
 

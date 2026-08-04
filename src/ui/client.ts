@@ -20,12 +20,9 @@ export interface RequestRecord {
   truncated: number;
   kind?: 'http' | 'websocket';
   /**
-   * The wire protocol negotiated with the client/origin respectively —
-   * independent of each other, and independent of `protocol` (the URL
-   * scheme). `null`/absent means genuinely unknown (e.g. a row captured
-   * before this field existed); see `wireProtocolLabel` for the one place
-   * that turns that into display text, and never render it as `'http/1.1'`
-   * directly.
+   * Wire protocol negotiated on this hop, independent of the other hop
+   * and of `protocol` (URL scheme). `null`/absent means unknown —
+   * see `wireProtocolLabel`; never treat it as `'http/1.1'`.
    */
   client_protocol?: 'http/1.1' | 'h2' | null;
   origin_protocol?: 'http/1.1' | 'h2' | null;
@@ -143,18 +140,6 @@ export async function setThrottle(
   return (await res.json()).settings;
 }
 
-/**
- * Which dropdown option the current throttle settings correspond to.
- *
- * - 'unknown' when state hasn't loaded yet, or the fetch failed. This must NOT
- *   collapse into 'off': claiming "disabled" when the real state is unknown
- *   misreports it, exactly as misreporting a custom rate as 'off' would.
- * - 'off' when throttling is confirmed disabled.
- * - a preset key only when all three values (down/up/latency) match exactly —
- *   a partial match (e.g. right downKbps, wrong latencyMs) is NOT a preset.
- * - 'custom' when enabled but no preset matches exactly. This is reachable
- *   because the CLI/API accept arbitrary --down/--up/--latency values.
- */
 export interface ThrottleFormValues {
   downKbps: number;
   upKbps: number;
@@ -162,14 +147,9 @@ export interface ThrottleFormValues {
 }
 
 /**
- * Parses the three text inputs of the custom-throttle popover into a
- * validated payload, mirroring the server's `validateThrottleSettings`
- * (`src/server/throttle.ts`): each field must be finite and non-negative.
- * This is a client-side convenience only — it lets the popover reject an
- * obviously-bad value (blank, negative, "fast") without a round trip, but it
- * is not the source of truth. The server's own 400/500 must still be
- * surfaced to the user even when this parse passes, since persistence can
- * fail for reasons this function can't see.
+ * Parses the custom-throttle popover's three text inputs into a validated
+ * payload, mirroring the server's `validateThrottleSettings`: each field
+ * must be finite and non-negative. Not the source of truth.
  */
 export function parseThrottleInputs(
   downKbps: string,
@@ -186,9 +166,8 @@ export function parseThrottleInputs(
     const trimmed = raw.trim();
     if (trimmed === '') return { error: `${key} is required` };
     const n = Number(trimmed);
-    // Number.isFinite rejects NaN/±Infinity and, since `trimmed` is already a
-    // string, also anything Number() can't parse ('fast' -> NaN). Matches the
-    // server's own check exactly.
+    // Number.isFinite rejects NaN/±Infinity and unparsable strings ('fast' -> NaN),
+    // matching the server's own check.
     if (!Number.isFinite(n) || n < 0) return { error: `${key} must be a non-negative number` };
     values[key] = n;
   }
@@ -196,42 +175,37 @@ export function parseThrottleInputs(
 }
 
 /**
- * Normalizes a record's `kind` to a definite category. `kind` is optional,
- * and legacy rows captured before the WebSocket migration read back as
- * `null` or `undefined` rather than `'http'` (see `RequestFilter.kind` in
- * `src/shared/types.ts` for the server-side version of this same rule).
- * Anything other than the literal `'websocket'` counts as `'http'` —
- * deliberately, so a legacy row is never miscategorised as "unknown" or
- * shown as a WebSocket connection it isn't. Shared by the traffic list's
- * inline WS marker and the filter bar's WS chip so the two can't disagree
- * about what counts as a WebSocket row.
+ * Normalizes `kind` to a definite category. Legacy rows predate this field
+ * and read back null/undefined; anything but `'websocket'` counts as
+ * `'http'`, so a legacy row is never miscategorized as unknown.
  */
 export function recordKind(record: { kind?: RequestRecord['kind'] | null }): 'http' | 'websocket' {
   return record.kind === 'websocket' ? 'websocket' : 'http';
 }
 
 /**
- * Whether a record's client hop negotiated HTTP/2. Exact match only — a
- * missing/null `client_protocol` must never register as h2 by coincidence of
- * a loose check, the same "unknown must not read as a definite value" rule
- * `wireProtocolLabel` follows for display text.
+ * Whether the client hop negotiated HTTP/2 — exact match only, so a missing
+ * or null `client_protocol` never registers as h2 by a loose check,
+ * mirroring `wireProtocolLabel`'s unknown-stays-unknown rule.
  */
 export function isH2Client(record: { client_protocol?: RequestRecord['client_protocol'] }): boolean {
   return record.client_protocol === 'h2';
 }
 
 /**
- * Human label for a wire-protocol field that may be null/undefined.
- *
- * Mirrors the CLI's `wireProtocolLabel` (`src/cli/format.ts`): a hop with no
- * recorded value must display as `'unknown'`, never silently default to
- * `'http/1.1'` — that would misrepresent a genuinely unrecorded hop as a
- * known one, the dominant defect class this feature exists to avoid.
+ * Human label for a wire-protocol field that may be null/undefined — mirrors
+ * the CLI's `wireProtocolLabel`. An unrecorded hop displays as 'unknown',
+ * never silently defaulting to 'http/1.1'.
  */
 export function wireProtocolLabel(value?: 'http/1.1' | 'h2' | null): 'http/1.1' | 'h2' | 'unknown' {
   return value === 'h2' || value === 'http/1.1' ? value : 'unknown';
 }
 
+/**
+ * Which dropdown option the current settings match. 'unknown' before state
+ * loads (never read as 'off'); 'off' when disabled; a preset key only on
+ * an exact down/up/latency match; else 'custom'.
+ */
 export function activePreset(state: ThrottleState | null): string {
   if (!state) return 'unknown';
   if (!state.settings.enabled) return 'off';
@@ -243,13 +217,9 @@ export function activePreset(state: ThrottleState | null): string {
 }
 
 /**
- * Loads throttle state and polls the server so the display stays accurate
- * even when throttling was changed from elsewhere (e.g. the `throttle` CLI
- * command) while the UI is open. Mirrors the polling pattern `Controls`
- * already uses for proxy status. Independent components (the toolbar pill
- * and the traffic view's duration note) each call this on their own rather
- * than threading throttle state through `App` — the endpoint is cheap and
- * this avoids adding shared/global state for a single small feature.
+ * Loads throttle state and polls the server so the display stays accurate even
+ * when changed elsewhere (e.g. the `throttle` CLI) while the UI is open.
+ * Each caller polls independently; cheap enough to not share globally.
  */
 export function useThrottle(pollMs = 5000): { throttle: ThrottleState | null; refresh: () => void } {
   const [throttle, setThrottleState] = useState<ThrottleState | null>(null);
@@ -363,11 +333,9 @@ export interface WsReplayResponse {
 }
 
 /**
- * Replays a captured WebSocket connection by `requestId` only. Never post
- * `{ url, frames }` from the browser: `express.json()` on the server has no
- * `limit` override, so the default 100kb body cap applies, and a single
- * recorded frame's base64 payload can exceed that on its own — replaying
- * exactly the captures most worth replaying would fail.
+ * Replays a captured WebSocket connection by `requestId` only — never post
+ * `{ url, frames }`: the server's default 100kb JSON body cap can't fit
+ * a single frame's base64 payload on its own.
  */
 export async function replayWebSocketConnection(requestId: string): Promise<WsReplayResponse> {
   const res = await fetch(`${API_BASE}/websocket/replay`, {
@@ -385,10 +353,9 @@ const WS_CONTROL_ESCAPES: Record<number, string> = {
 };
 
 /**
- * Neutralizes C0 control characters (including DEL, 0x7f) before a decoded
- * payload reaches the DOM — mirrors the CLI's `escapeWsControlChars` so a
- * captured frame (untrusted data) can't smuggle in stray control bytes that
- * would render oddly outside a normal text flow.
+ * Neutralizes C0 control characters (and DEL, 0x7f) before a decoded payload
+ * reaches the DOM, mirroring the CLI's `escapeWsControlChars` — a captured
+ * frame is untrusted data that could otherwise render oddly.
  */
 export function escapeWsControlChars(text: string): string {
   let out = '';
@@ -515,15 +482,9 @@ export function describeReplayOutcome(response: WsReplayResponse): WsReplayOutco
 }
 
 /**
- * Merges a freshly-fetched page of messages with whatever is already held
- * locally (e.g. a frame appended live via the `ws-message` SSE event while
- * the fetch was still in flight). The fetch result is not trusted as
- * necessarily complete: if the SSE stream delivered a frame between the
- * fetch firing and it resolving, and the fetch's own DB read predates that
- * frame, blindly replacing local state with the fetch result would silently
- * drop it — the connection would then appear to have carried less traffic
- * than it actually did. Dedupes by id (the fetched copy wins on conflict)
- * and sorts by timestamp so the race can't reorder frames either.
+ * Merges a freshly-fetched page of messages with any already held locally
+ * (e.g. a frame appended live via SSE mid-fetch) — replacing local state
+ * outright could silently drop it. Dedupes by id; fetched copy wins.
  */
 export function mergeWsMessages(existing: UiWsMessage[], fetched: UiWsMessage[]): UiWsMessage[] {
   const byId = new Map<string, UiWsMessage>();
@@ -543,15 +504,14 @@ export interface UseWsMessagesResult {
 
 /**
  * Loads a WebSocket connection's captured frames and keeps them live via the
- * `ws-message` SSE event, filtered to this connection. Intended to be
- * mounted only while the Messages tab is active — mount/unmount is the
- * activation signal, so there's no separate "active" flag to keep in sync.
+ * `ws-message` SSE event, filtered to this connection. Mount/unmount is
+ * the activation signal — no separate "active" flag to track.
  *
  * Distinguishes loading/loaded/error explicitly: a failed fetch surfaces as
  * `state: 'error'`, never as an empty `messages` array. Collapsing "fetch
  * failed" into "no messages" would misreport a connection that errored as
- * one that carried no traffic at all — the same failure class as Task 6's
- * throttle control reporting unknown state as "off".
+ * one that carried no traffic at all, the same failure class as reporting
+ * unknown throttle state as "off".
  */
 export function useWsMessages(requestId: string): UseWsMessagesResult {
   const [data, setData] = useState<{ messages: UiWsMessage[]; total: number }>({ messages: [], total: 0 });

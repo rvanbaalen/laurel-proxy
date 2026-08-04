@@ -156,9 +156,8 @@ function waitForProcessExit(pid: number, timeoutMs = 3000): Promise<boolean> {
 // ── Port binding ──
 
 /**
- * Try to listen on a port. If EADDRINUSE:
- * 1. Check if it's another laurel-proxy — if so, shut it down and retry
- * 2. Otherwise, try the next port (up to maxRetries)
+ * Tries to listen on a port, retrying up to `maxRetries` times on EADDRINUSE.
+ * Shuts down and reclaims the port if the conflict is another laurel-proxy.
  */
 export function listenWithRetry(
   server: http.Server,

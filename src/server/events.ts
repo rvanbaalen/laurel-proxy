@@ -9,6 +9,11 @@ type RequestSubscriber = (events: RequestRecord[]) => void;
 type StatusSubscriber = (status: StatusEvent) => void;
 type WsMessageSubscriber = (messages: WebSocketMessage[]) => void;
 
+/**
+ * Pub/sub hub between the proxy internals and SSE handlers: batches request
+ * records on a timer, but relays WebSocket messages and status changes
+ * immediately.
+ */
 export class EventManager {
   private requestSubscribers: Set<RequestSubscriber> = new Set();
   private statusSubscribers: Set<StatusSubscriber> = new Set();
@@ -16,6 +21,10 @@ export class EventManager {
   private buffer: RequestRecord[] = [];
   private timer: ReturnType<typeof setTimeout> | null = null;
 
+  /**
+   * Buffers a record for the next scheduled flush, batching bursts of requests
+   * so SSE delivery lags by up to 100ms rather than firing per record.
+   */
   push(record: RequestRecord): void {
     this.buffer.push(record);
     if (!this.timer) {
@@ -34,12 +43,20 @@ export class EventManager {
     }
   }
 
+  /**
+   * Notifies every status subscriber synchronously; a subscriber that throws
+   * cannot block delivery to the rest.
+   */
   emitStatus(status: StatusEvent): void {
     for (const sub of this.statusSubscribers) {
       try { sub(status); } catch {}
     }
   }
 
+  /**
+   * Drains the buffered batch to every request subscriber once the 100ms
+   * timer fires; a no-op if nothing was buffered.
+   */
   private flush(): void {
     this.timer = null;
     if (this.buffer.length === 0) return;
@@ -50,26 +67,28 @@ export class EventManager {
     }
   }
 
+  /** Registers a request-batch subscriber and returns an unsubscribe function. */
   subscribe(fn: RequestSubscriber): () => void {
     this.requestSubscribers.add(fn);
     return () => { this.requestSubscribers.delete(fn); };
   }
 
+  /** Registers a status subscriber and returns an unsubscribe function. */
   subscribeStatus(fn: StatusSubscriber): () => void {
     this.statusSubscribers.add(fn);
     return () => { this.statusSubscribers.delete(fn); };
   }
 
+  /** Registers a WebSocket-message subscriber and returns an unsubscribe function. */
   subscribeWsMessages(fn: WsMessageSubscriber): () => void {
     this.wsSubscribers.add(fn);
     return () => { this.wsSubscribers.delete(fn); };
   }
 
   /**
-   * Stopped means stopped: the pending batch is dropped and every channel is
-   * released, so nothing can keep receiving from a manager that is down. All
-   * three subscriber sets are cleared — one SSE handler subscribes to all of
-   * them, so clearing only some would leave that handler half-connected.
+   * On stop the pending batch is dropped and every subscriber set is cleared,
+   * since one SSE handler subscribes to all three and clearing only some
+   * would leave it half-connected.
    */
   stop(): void {
     if (this.timer) {

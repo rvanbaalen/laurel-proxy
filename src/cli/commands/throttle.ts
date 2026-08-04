@@ -9,7 +9,11 @@ export interface ApiResult {
   body: Record<string, unknown>;
 }
 
-/** Exported so the integration test can drive it against a real server. */
+/**
+ * Sends an HTTP request to the local proxy API and resolves with the
+ * parsed JSON response. Exported so integration tests can drive it
+ * against a real server.
+ */
 export function api(port: number, method: string, path: string, payload?: unknown): Promise<ApiResult> {
   return new Promise((resolve, reject) => {
     const data = payload === undefined ? null : Buffer.from(JSON.stringify(payload));
@@ -75,10 +79,9 @@ export function parseRateOption(value: string | undefined, label: string): numbe
 export const VALID_THROTTLE_FORMATS = ['json', 'table', 'agent'] as const;
 
 /**
- * Reports a failure respecting --format. Plain text on stderr for humans;
- * a JSON object on stdout for `--format json`/`--format agent` callers
- * (scripts, AI agents) so they always get parseable output, success or
- * failure, without having to special-case stderr scraping.
+ * Reports a failure respecting --format: plain text on stderr for
+ * humans, JSON on stdout for `--format json`/`agent` callers so
+ * scripts get parseable output either way.
  */
 function reportError(message: string, format: string): void {
   if (format === 'json' || format === 'agent') {
@@ -88,6 +91,10 @@ function reportError(message: string, format: string): void {
   }
 }
 
+/**
+ * Registers the `throttle` command, which reads or updates the proxy's
+ * bandwidth simulation over its local REST API.
+ */
 export function registerThrottle(program: Command): void {
   program
     .command('throttle [preset]')
@@ -107,11 +114,8 @@ export function registerThrottle(program: Command): void {
 
       const port = parseInt(opts.uiPort, 10);
 
-      // Show current settings when --status is passed, or when no preset and
-      // no rate flags were given at all. Note: a flag string like "0" (e.g.
-      // `--latency 0`) is truthy in JS, so `!opts.latency` is only true when
-      // the flag was never supplied — a literal zero correctly routes below,
-      // to the update branch, instead of being mistaken for "no argument".
+      // A flag string like "0" is truthy, so `!opts.latency` is only true
+      // when the flag was never supplied, not when it's literally 0.
       if (opts.status || (!preset && !opts.down && !opts.up && !opts.latency)) {
         try {
           const res = await api(port, 'GET', '/api/throttle');
@@ -136,9 +140,8 @@ export function registerThrottle(program: Command): void {
 
       let payload: Record<string, unknown>;
       if (preset) {
-        // A preset name (including 'off') fully replaces settings server-side;
-        // any --down/--up/--latency given alongside it are ignored, matching
-        // PUT /api/throttle's documented precedence.
+        // A preset (including 'off') fully replaces settings server-side; any
+        // --down/--up/--latency given alongside it are ignored.
         payload = { preset };
       } else {
         try {

@@ -38,19 +38,14 @@ export function handleWebSocketUpgrade(
   target: ExchangeTarget,
   deps: WebSocketDeps,
 ): void {
-  // The one piece of recording state that has to exist before the guard: the
-  // connection row and every frame recorded against it key off the same id, so
-  // it cannot be minted inside either of them. `randomUUID` fails only when the
-  // platform CSPRNG is unavailable, which would already have stopped this proxy
-  // from generating a certificate.
+  // Minted before either outcome so both share the same id; randomUUID only
+  // fails if the CSPRNG is gone, which would already break cert generation.
   const id = randomUUID();
   const startTime = Date.now();
   const { config } = deps;
 
-  // Fields both outcomes — an accepted upgrade or a refusal — record the same.
-  // A function rather than an object so the building happens inside whichever
-  // guard is about to use it: this runs from an EventEmitter handler, where a
-  // throw is an uncaught exception, and it exists only for the recording.
+  // Lazily built so construction happens inside whichever recordSafely guard
+  // calls it; a throw here would otherwise be an uncaught EventEmitter exception.
   const requestFields = () => ({
     id,
     timestamp: startTime,
@@ -83,10 +78,8 @@ export function handleWebSocketUpgrade(
     ...(target.protocol === 'https' ? { rejectUnauthorized: false } : {}),
   });
 
-  // Anything already written to the client socket makes it too late to send a
-  // status line: after a 101 the socket carries frames, and after a refusal's
-  // head it carries that response's body. Appending an HTTP status line to
-  // either corrupts the stream, which is worse than truncating it.
+  // Once a status line is written the socket carries frames or a response
+  // body; these flags track whether it's still safe to prepend one.
   let upgraded = false;
   let responseStarted = false;
   let upstreamSocket: net.Socket | null = null;
@@ -99,14 +92,8 @@ export function handleWebSocketUpgrade(
     // Sec-WebSocket-Accept against the key the client itself chose.
     clientSocket.write(serializeHead(upstreamRes));
 
-    // Queued before any frame can be observed below. The proxy flushes the
-    // request queue ahead of the frame queue on the same timer, so a reader can
-    // never see a frame whose parent connection row is still missing.
-    //
-    // Built inside the guard, not passed into it: this runs from an EventEmitter
-    // handler, so an argument expression that threw — `JSON.stringify` on
-    // headers, say — would be an uncaught exception, killing the process over a
-    // row it failed to write.
+    // Recorded here before any frame, so a reader never sees an orphan frame;
+    // built inside the guard because an argument expression that throws would be uncaught.
     recordSafely(() =>
       deps.onRecord({
         ...requestFields(),
@@ -118,12 +105,8 @@ export function handleWebSocketUpgrade(
         duration: Date.now() - startTime,
         content_type: 'websocket',
         truncated: 0,
-        // Both hops are h1.1 by construction, not by default: a WebSocket
-        // handshake only ever arrives via the `Upgrade` header, which HTTP/2
-        // forbids outright, so the client hop cannot be anything else. The
-        // upstream connection here is the plain `http`/`https` transport
-        // (never `UpstreamTransport`, never ALPN-negotiated), so the origin
-        // hop is equally definite.
+        // Both hops are guaranteed h1.1: HTTP/2 forbids the `Upgrade` header, and
+        // this path never goes through the ALPN-negotiated UpstreamTransport.
         client_protocol: 'http/1.1',
         origin_protocol: 'http/1.1',
       }),
@@ -131,11 +114,8 @@ export function handleWebSocketUpgrade(
 
     const observe = makeObserver(id, config, deps.onMessages);
 
-    // Both handshakes can carry stream bytes past their own headers, and each
-    // belongs to the direction it came from: `upstreamHead` was read from
-    // upstream (server→client, 'received'), `head` from the client
-    // (client→server, 'sent'). They are observed and forwarded before the pumps
-    // start so neither the recording nor the relay reorders them.
+    // upstreamHead ('received') and head ('sent') are pre-handshake bytes already
+    // read; both are observed and written before the pumps start to preserve order.
     if (upstreamHead?.length) {
       observeSafely(observe, 'received', upstreamHead);
       clientSocket.write(upstreamHead);
@@ -153,15 +133,12 @@ export function handleWebSocketUpgrade(
    * ordinary HTTP exchange: relay it and record it as one.
    */
   const relayRefusal = async (upstreamRes: http.IncomingMessage): Promise<void> => {
-    // Claimed before the first await: an upstream reset during the latency delay
-    // would otherwise emit 'error' on an IncomingMessage nobody listens to,
-    // which is an uncaught exception. The await loop below has its own handling.
+    // Attached before the first await, since an unheard 'error' event here would
+    // be an uncaught exception; the loop below handles its own errors separately.
     upstreamRes.on('error', () => {});
     await deps.throttle?.delayLatency();
-    // Upstream's framing headers cannot be forwarded: Node hands us an already
-    // decoded body, so a relayed `Transfer-Encoding: chunked` would leave the
-    // client reading plain bytes as chunk headers. `Connection: close` plus the
-    // end() below delimits the body unambiguously in every case.
+    // Node hands us an already-decoded body, so relaying upstream's own
+    // Transfer-Encoding header would corrupt it; Connection: close + end() delimits it instead.
     responseStarted = true;
     clientSocket.write(
       serializeHead(upstreamRes, ['Connection: close'], ['transfer-encoding', 'connection']),
@@ -172,10 +149,8 @@ export function handleWebSocketUpgrade(
     let responseSize = 0;
     try {
       for await (const chunk of upstreamRes as AsyncIterable<Buffer>) {
-        // Guarded because this `try`'s catch destroys the client socket: a
-        // failure in the capture bookkeeping must not abort a transfer that is
-        // otherwise proceeding perfectly. Same inversion as the frame path, one
-        // layer down.
+        // Guarded separately: a bookkeeping failure here must not trip the
+        // outer catch, which would abort an otherwise-healthy transfer.
         recordSafely(() => {
           responseSize += chunk.length;
           if (capturedLength < config.maxBodySize) {
@@ -188,18 +163,15 @@ export function handleWebSocketUpgrade(
         if (!clientSocket.write(chunk)) await waitForDrain(clientSocket);
       }
     } catch {
-      // Recording a half-transferred response as if it completed would be
-      // actively misleading, so this exchange goes unrecorded — same rule the
-      // HTTP path follows.
+      // A half-transferred response recorded as complete would be misleading,
+      // so this exchange goes unrecorded — same rule as the HTTP path.
       clientSocket.destroy();
       return;
     }
     clientSocket.end();
 
-    // Built inside the guard for the same reason as the accepted-upgrade row,
-    // and with the same consequence if it were not: `relayRefusal` is started
-    // with `void`, so a rejection from here reaches nobody and Node 22 turns it
-    // into a process exit.
+    // Built inside the guard, as above: relayRefusal runs via `void`, so an
+    // uncaught rejection here becomes a Node process exit.
     recordSafely(() => {
       const body = Buffer.concat(captured);
       deps.onRecord({
@@ -212,9 +184,8 @@ export function handleWebSocketUpgrade(
         duration: Date.now() - startTime,
         content_type: (upstreamRes.headers['content-type'] || '').split(';')[0].trim() || null,
         truncated: responseSize > config.maxBodySize ? 1 : 0,
-        // Same reasoning as the accepted-upgrade row above: this refusal was
-        // still reached via an `Upgrade` request over the plain http/https
-        // transport, so both hops are h1.1 by construction.
+        // Same reasoning as the accepted-upgrade row: reached via an Upgrade
+        // request over plain http/https, so both hops are h1.1 by construction.
         client_protocol: 'http/1.1',
         origin_protocol: 'http/1.1',
       });
@@ -272,11 +243,9 @@ function serializeHead(
 }
 
 /**
- * Wires up both directions of the byte relay.
- *
- * Each direction gets its own pump; the only thing they share is the observer,
- * which holds no socket. An error on either socket tears the peer down, since a
- * half-broken tunnel has nothing left to relay.
+ * Wires up both directions of the relay with separate pumps that share only
+ * the observer, which holds no socket; either socket's error tears down
+ * the peer, since a half-broken tunnel has nothing left to relay.
  */
 function relay(
   clientSocket: net.Socket,
@@ -320,9 +289,8 @@ async function pump(
   try {
     for await (const chunk of from as AsyncIterable<Buffer>) {
       observeSafely(observe, direction, chunk);
-      // `for await` handles read-side backpressure; consuming from the limiter
-      // here (rather than chaining off the optional call) degrades to a plain
-      // no-op await when throttling is absent — see Throttler.
+      // `for await` already handles read-side backpressure; the optional
+      // limiter call below simply no-ops when throttling is absent (see Throttler).
       await limiter?.consume(chunk.length);
       if (!to.write(chunk)) await waitForDrain(to);
     }
@@ -330,10 +298,8 @@ async function pump(
     // Either side can vanish mid-stream. The half-close below is guarded, and
     // the peer's error handler destroys whatever is left.
   }
-  // Forward the half-close so the peer learns this direction is over. Each
-  // socket is ended by exactly one pump — its reader — so nothing is ended
-  // twice; the guard covers end() on an already-destroyed socket, which would
-  // otherwise raise an unhandled 'error'.
+  // Ended by exactly one pump (its reader), so never twice; the guard also
+  // avoids end() on an already-destroyed socket, which raises an unhandled 'error'.
   if (!to.destroyed && !to.writableEnded) to.end();
 }
 
@@ -351,13 +317,8 @@ function makeObserver(
   config: Config,
   onMessages: (messages: WebSocketMessage[]) => void,
 ): Observer {
-  // Built on first use rather than here, so construction happens inside the
-  // observer — which every call site invokes through the recording guard —
-  // rather than in the EventEmitter handler that calls `makeObserver`, where a
-  // throw would be an uncaught exception. A `null` entry is written first, so a
-  // constructor that threw latches the direction off instead of being retried on
-  // the next chunk: a decoder started mid-stream would resynchronise on the
-  // wrong frame boundary, and a wrong boundary is worse than a missing frame.
+  // Built lazily inside the guard so a throwing constructor isn't an uncaught
+  // exception; a failed direction latches off rather than retrying mid-stream.
   const decoders = new Map<Direction, WsFrameDecoder | null>();
 
   return (direction, chunk) => {
@@ -370,9 +331,8 @@ function makeObserver(
 
     let frames: WsMessage[];
     try {
-      // Decoded from a copy. The decoder documents that it treats its input as
-      // read-only; copying makes the relay's fidelity independent of that
-      // promise, at the cost of one memcpy per chunk.
+      // Copied first: the decoder claims to treat input as read-only, but
+      // copying keeps relay fidelity independent of that promise (one extra memcpy per chunk).
       frames = decoder.push(Buffer.from(chunk));
     } catch {
       // Defensive: the decoder reports failure through isFailed, not by

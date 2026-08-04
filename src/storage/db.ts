@@ -74,23 +74,17 @@ export class Database {
   }
 
   /**
-   * Add columns introduced after the original schema shipped. Guarded by
-   * `table_info` so it is a no-op on every run after the first — this runs on
-   * every `Database` construction (i.e. every CLI invocation), so it must
-   * never throw against a database that already has the column.
+   * Adds columns introduced after the original schema shipped, guarded by
+   * `table_info` so each is a no-op past its first run — this fires on
+   * construction, so it must not throw against an up-to-date db.
    */
   private migrate(): void {
     const columns = this.db.pragma('table_info(requests)') as { name: string }[];
     if (!columns.some((c) => c.name === 'kind')) {
       this.db.exec(`ALTER TABLE requests ADD COLUMN kind TEXT DEFAULT 'http'`);
     }
-    // Both hops predate this pair of columns by construction: before HTTP/2
-    // support existed, every exchange this proxy ever recorded spoke
-    // HTTP/1.1 on both the client and origin hops, full stop. So — unlike a
-    // brand-new record that omits these fields, which means genuinely unknown
-    // (see `bindRecord`) — backfilling every pre-existing row with
-    // `'http/1.1'` is not a guess, it's the only value that could ever have
-    // been true for a row written before this column existed.
+    // Rows predating HTTP/2 really were http/1.1 on both hops, so backfilling
+    // that literal isn't a guess (contrast the null default in `bindRecord`).
     if (!columns.some((c) => c.name === 'client_protocol')) {
       this.db.exec(`ALTER TABLE requests ADD COLUMN client_protocol TEXT DEFAULT 'http/1.1'`);
     }
@@ -187,13 +181,8 @@ export class Database {
     ).count;
     const data = this.db
       .prepare(
-        // SQLite documents tie order under `ORDER BY timestamp` alone as
-        // undefined, and frames within one connection can share a millisecond
-        // timestamp. Adding `rowid ASC` (implicit, since the table isn't
-        // WITHOUT ROWID) makes the order fully deterministic and matches
-        // insertion order, so paginated calls can't duplicate or skip a tied
-        // row even if a future schema/query-plan change altered the
-        // otherwise-unspecified tie behavior.
+        // `rowid ASC` breaks ties on `timestamp`, whose order SQLite leaves
+        // undefined, so paginated calls can't duplicate or skip a tied row.
         `SELECT * FROM websocket_messages WHERE request_id = @requestId
          ORDER BY timestamp ASC, rowid ASC LIMIT @limit OFFSET @offset`,
       )
@@ -298,10 +287,8 @@ export class Database {
   }
 
   deleteOlderThan(timestampMs: number): number {
-    // Must run before the requests delete below: the subquery reads
-    // `requests` to find which connections are being removed, so it needs
-    // those rows to still exist. Deleting requests first would make this
-    // match nothing and orphan every message for the deleted connections.
+    // Must run before the requests delete below: its subquery reads
+    // `requests` to find the connections being removed.
     this.db
       .prepare(
         `DELETE FROM websocket_messages WHERE request_id IN
@@ -312,13 +299,8 @@ export class Database {
   }
 
   deleteOldest(limit: number): number {
-    // Capture the exact set of oldest ids once, up front, and reuse it for
-    // both deletes. Running the "oldest N" subquery twice (once for the
-    // message cleanup, once for the requests delete) would rely on the two
-    // independent SELECTs returning identical rows for the child delete to
-    // see the right set — true today since nothing mutates `requests`
-    // between the two statements, but fragile to reason about and to keep
-    // true under future changes. Capturing ids removes that assumption.
+    // Captures the id set once and reuses it for both deletes, rather than
+    // running the "oldest N" subquery twice and relying on identical results.
     const ids = (
       this.db.prepare('SELECT id FROM requests ORDER BY timestamp ASC LIMIT ?').all(limit) as {
         id: string;

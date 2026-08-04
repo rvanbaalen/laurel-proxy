@@ -1,8 +1,7 @@
 /**
- * The slice of a writable stream {@link waitForDrain} needs. Kept structural so
- * that `net.Socket` (the WebSocket relay), `http.ServerResponse` (the HTTP
- * exchange) and `Http2ServerResponse` all satisfy it — in Node's typings the
- * second is not a `Writable`, and the third is a separate class from the second.
+ * The slice of a writable stream {@link waitForDrain} needs, kept structural
+ * so `net.Socket`, `http.ServerResponse`, and `Http2ServerResponse` all
+ * satisfy it despite Node's inconsistent typings across the three.
  *
  * `destroyed` is `boolean | undefined` because on Node 22.21.1 an
  * `Http2ServerResponse` **does not have the property at all**, despite
@@ -16,10 +15,9 @@
 export interface DrainableStream {
   destroyed: boolean | undefined;
   /**
-   * The HTTP/2 stream behind an `Http2ServerResponse`, absent on every HTTP/1.1
-   * shape. It is where the truth about `destroyed` actually lives for h2, so
-   * naming it here is what lets {@link isGone} answer the question for both
-   * protocols instead of only one — see the `destroyed` note above.
+   * The HTTP/2 stream behind an `Http2ServerResponse`, absent on HTTP/1.1.
+   * Holds the real `destroyed` value for h2, so {@link isGone} can answer
+   * for both protocols.
    */
   readonly stream?: { readonly destroyed: boolean } | undefined;
   on(event: 'drain' | 'close' | 'error', listener: () => void): unknown;

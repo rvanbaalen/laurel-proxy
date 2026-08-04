@@ -108,15 +108,9 @@ export interface ExchangeDeps {
    */
   upstream?: UpstreamRequester;
   /**
-   * The wire protocol negotiated with the **client**, which decides how
-   * upstream's response headers are relayed back — see
-   * {@link relayResponseHeaders}.
-   *
-   * Independent of what the origin speaks: an h2 client in front of an
-   * HTTP/1.1-only origin is a normal case, and the origin's `Connection` and
-   * `Keep-Alive` headers cannot be put on an h2 stream at all. Only the caller
-   * that owns the client socket knows this, so it is passed in rather than
-   * inferred, and omitting it means HTTP/1.1 — every pre-existing call site.
+   * Wire protocol negotiated with the client; decides how upstream headers relay
+   * back, independent of the origin's own protocol. Passed in by the
+   * caller; omitting it means HTTP/1.1.
    */
   clientProtocol?: NegotiatedProtocol;
 }
@@ -142,6 +136,13 @@ function sharedUpstream(): UpstreamTransport {
 /** Hop-by-hop headers that must not be forwarded upstream. */
 const HOP_BY_HOP = ['proxy-connection', 'proxy-authorization'];
 
+/**
+ * Resolves a plain-HTTP proxy request's absolute-form URL into an
+ * {@link ExchangeTarget}. Returns null for anything not `http:`.
+ *
+ * @param rawUrl - The absolute-form request URL, e.g. `http://host/path`.
+ * @returns The resolved target, or null if `rawUrl` isn't a valid `http:` URL.
+ */
 export function resolveHttpTarget(rawUrl: string): ExchangeTarget | null {
   let parsed: URL;
   try {
@@ -159,10 +160,18 @@ export function resolveHttpTarget(rawUrl: string): ExchangeTarget | null {
   };
 }
 
+/**
+ * Resolves an intercepted HTTPS request into an {@link ExchangeTarget}. Always
+ * `https:` — mitm-only.
+ *
+ * @param hostname - The TLS SNI/CONNECT hostname.
+ * @param port - The TLS CONNECT port.
+ * @param rawPath - The request path plus query string.
+ * @returns The resolved target.
+ */
 export function resolveMitmTarget(hostname: string, port: number, rawPath: string): ExchangeTarget {
-  // Include a non-default port in the recorded URL. Omitting it makes replay of
-  // any non-443 HTTPS capture silently target 443 — both for the HTTP Repeater
-  // and for WebSocket replay, which derive their target from this URL.
+  // Non-default port must stay in the recorded URL — omitting it makes replay
+  // (HTTP Repeater, WebSocket replay) silently target 443 instead.
   const authority = port === 443 ? hostname : `${hostname}:${port}`;
   return {
     hostname,
@@ -197,12 +206,12 @@ export function resolveMitmTarget(hostname: string, port: number, rawPath: strin
  * all — while `599` is fine. So the h2 range is 200–599, not the 100–999 an
  * HTTP/1.1 client accepts. (HTTP/2 has no `101`: the protocol carries no
  * `Upgrade`, and informational responses go out through `additionalHeaders`, not
- * a final status.) A 6xx origin status relayed to an h2 client used to throw out
- * of the pipeline; `failExchange` then answered 502, leaving the h2 upstream body
- * unconsumed.
+ * a final status.) An unclamped 6xx origin status relayed to an h2 client throws
+ * out of the pipeline — `failExchange` then answers 502, leaving the h2 upstream
+ * body unconsumed.
  *
- * The HTTP/1.1 branch is byte-for-byte what it was, default included, so every
- * pre-existing call site keeps its exact meaning.
+ * The HTTP/1.1 branch, default included, is unchanged, so every call site that
+ * omits `clientProtocol` keeps its exact meaning.
  */
 export function sendableStatus(
   statusCode: number | undefined,
@@ -214,10 +223,9 @@ export function sendableStatus(
 }
 
 /**
- * Headers HTTP/2 forbids on any message, so they can never be relayed to an h2
- * client. `writeHead` on an `Http2ServerResponse` does not ignore them — Node's
- * `mapToHeaders` throws `ERR_HTTP2_INVALID_CONNECTION_HEADERS`, out of an
- * exchange nobody awaits.
+ * Headers HTTP/2 forbids on any message, so they can never be relayed to an
+ * h2 client — `writeHead` throws `ERR_HTTP2_INVALID_CONNECTION_HEADERS`
+ * rather than silently dropping them.
  */
 const H2_FORBIDDEN_RESPONSE_HEADERS = [
   'connection',
@@ -238,16 +246,16 @@ const H2_FORBIDDEN_RESPONSE_HEADERS = [
  * the connection reusable for keep-alive. Forcing `connection: close` instead is
  * a regression the integration suite pins against.
  *
- * Everything *else* upstream said reaches an HTTP/1.1 client untouched, which is
- * the pre-existing behaviour and is deliberately preserved: stripping `connection`
- * for h1.1 too would look harmless but would quietly convert an upstream
- * `connection: close` into a kept-alive client connection.
+ * Everything *else* upstream said reaches an HTTP/1.1 client untouched and by
+ * design: stripping `connection` for h1.1 too would look harmless but would
+ * quietly convert an upstream `connection: close` into a kept-alive client
+ * connection.
  *
  * For an h2 client the connection-specific headers cannot be relayed at all, so
  * they are dropped — the protocol carries that information in frames instead.
  * The parameter is how the two cases stay one function with one place to look:
- * the caller says which client it is talking to, and the h1.1 default keeps every
- * existing call site meaning exactly what it did before.
+ * the caller says which client it is talking to, and the h1.1 default covers
+ * every call site that doesn't specify one.
  */
 export function relayResponseHeaders(
   upstreamHeaders: http.IncomingHttpHeaders,
@@ -281,11 +289,8 @@ export function relayResponseHeaders(
  */
 export function failExchange(clientRes: ExchangeResponse): void {
   try {
-    // `isGone` rather than `clientRes.destroyed`: on an `Http2ServerResponse`
-    // that property does not exist, so reading it directly made this guard a
-    // no-op for every h2 client — the writes below then threw inside the `catch`
-    // and the guard silently meant nothing. `isGone` consults `res.stream`, where
-    // h2 keeps the answer, so a reset stream is now recognised as one.
+    // Uses `isGone`, not `clientRes.destroyed` — that property doesn't exist on
+    // `Http2ServerResponse`; `isGone` falls through to `res.stream` for h2.
     if (clientRes.writableEnded || isGone(clientRes)) return;
     if (!clientRes.headersSent) {
       clientRes.writeHead(502);
@@ -299,13 +304,9 @@ export function failExchange(clientRes: ExchangeResponse): void {
 }
 
 /**
- * Buffers a request body.
- *
- * Async iteration rather than `on('data')`/`on('end')`: it is the one consumption
- * style both `http.IncomingMessage` and `Http2ServerRequest` offer through the
- * same member, so it is what {@link ExchangeRequest} can require. It rejects on a
- * stream error exactly as the event form did, and it cannot hang on a stream that
- * ended before this was called.
+ * Buffers a request body via async iteration — the one consumption style shared
+ * by `http.IncomingMessage` and `Http2ServerRequest`. Rejects on a
+ * stream error; never hangs on an already-ended stream.
  */
 async function readBody(stream: ExchangeRequest): Promise<Buffer> {
   const chunks: Buffer[] = [];
@@ -339,6 +340,16 @@ function h2ClientGone(clientReq: ExchangeRequest, clientRes: ExchangeResponse): 
   return clientReq.stream?.destroyed === true || clientRes.stream?.destroyed === true;
 }
 
+/**
+ * Relays one client request to `target` upstream and its response back, applying
+ * throttling and capturing both bodies, then records the exchange via
+ * `deps.onRecord` once it is known to have completed.
+ *
+ * @param clientReq - The inbound request.
+ * @param clientRes - The response stream to write the relayed answer to.
+ * @param target - Where to send the request.
+ * @param deps - Config, the throttle, the upstream transport, and the record sink.
+ */
 export async function handleExchange(
   clientReq: ExchangeRequest,
   clientRes: ExchangeResponse,
@@ -355,32 +366,15 @@ export async function handleExchange(
     return;
   }
 
-  // The client has already gone away, so there is no one to forward this request
-  // on behalf of — and replaying a cancelled POST at the origin buys side effects
-  // nobody asked for. Nothing is written back, because there is nothing left to
-  // write to.
-  //
-  // **Best effort, and only that.** Node destroys a reset h2 stream a tick or two
-  // after the compatibility layer ends the request readable, so a cancel that
-  // lands mid-body is frequently *not* visible here — measured on Node 22.21.1.
-  // The check that actually keeps a cancelled exchange out of the recording is the
-  // identical one before `onRecord`; this one only saves the upstream request when
-  // it happens to be able to. Only reachable for HTTP/2; see {@link h2ClientGone}.
+  // Client already gone — skip forwarding so a cancelled request's side effects
+  // aren't replayed on the origin. Best-effort and HTTP/2-only; see {@link h2ClientGone}.
   if (h2ClientGone(clientReq, clientRes)) return;
 
   const upstreamHeaders: http.OutgoingHttpHeaders = { ...clientReq.headers };
   for (const name of HOP_BY_HOP) delete upstreamHeaders[name];
-  // HTTP/2 request pseudo-headers (`:method`, `:path`, `:scheme`, `:authority`)
-  // arrive as ordinary members of `Http2ServerRequest.headers`, and they are not
-  // headers: forwarding one to an HTTP/1.1 origin makes Node's client throw
-  // `ERR_INVALID_HTTP_TOKEN` on the colon, which failed every h2-client-to-
-  // HTTP/1.1-origin request with a 502 until it was caught. The information they
-  // carry is already in `target` and `clientReq.method`. Stripped here rather
-  // than in the transport because it is true of both upstream protocols —
-  // `toH2RequestHeaders` drops them again for its own reasons, and a client that
-  // smuggles a pseudo-header into an HTTP/1.1 request must not have it relayed
-  // either. The *record* keeps `clientReq.headers` untouched, so the capture
-  // still shows exactly what the client sent.
+  // HTTP/2 pseudo-headers (`:method`, `:path`, etc.) land in `.headers` but
+  // aren't real headers — forwarding one throws on an HTTP/1.1 origin. The
+  // record keeps `clientReq.headers` untouched, so the capture is unaffected.
   for (const name of Object.keys(upstreamHeaders)) {
     if (name.startsWith(':')) delete upstreamHeaders[name];
   }
@@ -388,22 +382,19 @@ export async function handleExchange(
   delete upstreamHeaders['accept-encoding'];
   if (target.protocol === 'https') upstreamHeaders.host = target.hostname;
 
-  // Pace the upload before sending the body upstream. Awaiting here (rather
-  // than chaining off an optionally-chained call) means this degrades to a
-  // plain no-op await when throttling is absent or disabled — see Throttler.
+  // Awaited plainly rather than chained off `?.`, so an absent/disabled
+  // throttle is a no-op — see Throttler.
   if (requestBody.length > 0) {
     await deps.throttle?.up.consume(requestBody.length);
   }
 
   let proxyRes: UpstreamResponse;
   try {
-    // Which wire protocol this speaks is the transport's business, not the
-    // pipeline's: it negotiates h2 or HTTP/1.1 with the origin via ALPN and
-    // returns one shape either way.
+    // Protocol negotiation (h2 vs HTTP/1.1 via ALPN) is the transport's concern;
+    // it returns one shape either way.
     proxyRes = await (deps.upstream ?? sharedUpstream()).request({
       target,
-      // Node's HTTP client defaults an absent method to GET, so spelling that
-      // default here keeps the behaviour while satisfying a required field.
+      // Mirrors Node's own default for an absent method, to satisfy a required field.
       method: clientReq.method ?? 'GET',
       headers: upstreamHeaders,
       body: requestBody,
@@ -416,15 +407,12 @@ export async function handleExchange(
     return;
   }
 
-  // Nothing consumes the upstream body until the relay loop below, so anything
-  // that throws in between leaks it. For HTTP/2 that is not merely an unread
-  // stream: `countingBody` pauses its source, which holds the flow-control
-  // window open, so the session's graceful idle close cannot complete and the
-  // real bound becomes the origin's own timeout. Destroy it explicitly.
+  // A throw before the relay loop below leaks the upstream body; for HTTP/2 it
+  // also holds the flow-control window open via `countingBody`, blocking the
+  // session's graceful idle close. Destroyed in the catch below.
   try {
-    // Inject configured latency once per exchange, before the first response
-    // byte reaches the client — this must not run per-chunk inside the
-    // streaming loop below.
+    // Latency runs once here, before the first response byte — not per-chunk
+    // in the streaming loop below.
     await deps.throttle?.delayLatency();
 
     // The status on the wire is coerced to what a response writer will accept; the
@@ -434,8 +422,8 @@ export async function handleExchange(
       relayResponseHeaders(proxyRes.headers, deps.clientProtocol),
     );
   } catch (err) {
-    // Rethrow so the dispatch site still answers the client with a 502, exactly
-    // as before — this only adds the cleanup that was missing.
+    // Rethrown so the dispatch site still answers with a 502; the body is
+    // destroyed first so it isn't leaked.
     proxyRes.body.destroy();
     throw err;
   }
@@ -447,9 +435,7 @@ export async function handleExchange(
   let relayFailed = false;
   try {
     for await (const chunk of proxyRes.body as AsyncIterable<Buffer>) {
-      // Guarded because this `try`'s catch destroys the client response: without
-      // it, a failure in the capture bookkeeping would abort a transfer that is
-      // otherwise proceeding perfectly.
+      // Wrapped so a bookkeeping failure can't abort an otherwise-healthy transfer.
       recordSafely(() => {
         responseSize += chunk.length;
         if (capturedLength < config.maxBodySize) {
@@ -467,25 +453,9 @@ export async function handleExchange(
     relayFailed = true;
   }
 
-  // A response that failed or was aborted mid-transfer must not be recorded as
-  // if it completed — a partial body with status 200 would be actively
-  // misleading for the network failures this proxy exists to diagnose.
-  //
-  // Three independent signals, and all are consulted because none implies the
-  // others. {@link h2ClientGone} covers the client end: an h2 stream the client
-  // reset produces neither a relay error nor an incomplete upstream body, because
-  // upstream's response really did arrive in full and every write to a closed
-  // `Http2ServerResponse` is a silent no-op. It is checked again here rather than
-  // only before the upstream request because the client is free to give up in
-  // between — which is precisely the window in which every other signal says
-  // success. `bodyStatus()` is the transport's own verdict on the response, and it
-  // catches endings a `for await` cannot see: HTTP/2 hands a body that stops
-  // early to its consumer as a *clean* end (see `upstream.ts`), so the loop above
-  // can finish normally on a body that was cut short. `relayFailed` covers the
-  // converse — the body arrived in full but writing it to the client threw — where
-  // the transport is entitled to say `complete` and the client still got a partial
-  // response. Recording only when nothing objected keeps this the strict superset
-  // of the previous `streamFailed` check that a no-behaviour-change refactor needs.
+  // None of these three implies the others, so all three guard against recording
+  // a partial transfer as complete: a client h2 reset, an upstream body that
+  // `bodyStatus()` saw end early, or a client write that threw (`relayFailed`).
   if (
     relayFailed ||
     h2ClientGone(clientReq, clientRes) ||
@@ -494,11 +464,8 @@ export async function handleExchange(
     return;
   }
 
-  // Everything the record is made of is built inside the guard, not passed into
-  // it. `handleExchange` is dispatched as `void handleExchange(...)`, so its
-  // rejection has no caller and Node 22 turns it into a process exit; and an
-  // argument expression would be evaluated before the guard was entered, which
-  // is how a total boundary quietly decays into one that merely happens to hold.
+  // Record built entirely inside the guard: an argument expression would evaluate
+  // before entry, and this fire-and-forget call has no caller to catch a throw.
   recordSafely(() => {
     const responseBody = Buffer.concat(captured);
     const truncated =
@@ -525,13 +492,9 @@ export async function handleExchange(
       duration: Date.now() - startTime,
       content_type: contentType,
       truncated: truncated ? 1 : 0,
-      // Both hops are known and definite at this point: the client hop is
-      // whatever `ProxyServer` negotiated via ALPN before this exchange was
-      // even dispatched (see `dispatchExchange`), defaulting to HTTP/1.1 only
-      // for the pre-existing call sites that never offered a choice — not a
-      // guess about an h2 client that failed to say so. The origin hop is the
-      // transport's own verdict after a real negotiation completed. Neither
-      // is ever "not sure", which is why this site never stores null.
+      // Both hops are definite here: client protocol comes from ALPN negotiation
+      // (default HTTP/1.1 for callers that don't specify one), origin protocol
+      // from the transport's own verdict — neither is ever stored as null.
       client_protocol: deps.clientProtocol ?? 'http/1.1',
       origin_protocol: proxyRes.protocol,
     });

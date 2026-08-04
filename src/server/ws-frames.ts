@@ -1,6 +1,5 @@
-// The canonical definition lives in shared/types.ts (it's part of the storage
-// and API surface, not just the frame decoder); re-exported here so existing
-// imports from this module keep working.
+// Canonical definition lives in shared/types.ts (storage/API surface, not just
+// the frame decoder); re-exported here so existing imports keep working.
 import type { WsOpcode } from '../shared/types.js';
 export type { WsOpcode };
 
@@ -22,19 +21,11 @@ const FIRST_CONTROL_OPCODE = 0x8;
 const MAX_CONTROL_PAYLOAD = 125;
 
 /**
- * Upper bound on a single frame's payload and on a reassembled fragmented
- * message. The wire format allows a 63-bit length, so a corrupt or hostile
- * length field would otherwise make the decoder buffer bytes that never
- * arrive — unbounded growth in a long-lived proxy process.
- *
- * 32 MiB is ~32x the 1 MiB default max-message-size that common WebSocket
- * stacks ship with (ws, Socket.IO), so no realistic frame trips it, while
- * being five orders of magnitude below what the length field permits and
- * small enough that even dozens of adversarial connections cannot exhaust a
- * default Node heap. Exceeding it fails the decoder rather than buffering;
- * because the decoder is a passive observer the relay keeps forwarding bytes
- * untouched and only the recording degrades.
+ * Caps payload/reassembly size well below the wire format's 63-bit length limit, so
+ * a hostile length can't make the decoder buffer forever; exceeding it only
+ * degrades recording, since the decoder never touches relayed bytes.
  */
+// 32 MiB: far above real WebSocket traffic, far below the 63-bit length max.
 export const MAX_PAYLOAD_BYTES = 32 * 1024 * 1024;
 
 const EMPTY = Buffer.alloc(0);
@@ -43,14 +34,8 @@ const EMPTY = Buffer.alloc(0);
 type FrameResult = 'incomplete' | 'invalid' | { message: WsMessage | null; end: number };
 
 /**
- * Incremental RFC 6455 frame decoder. Passive: it observes bytes and never
- * re-encodes them, so a decoding failure degrades recording without ever
- * corrupting relayed traffic.
- *
- * Buffer ownership: `this.buffer` is treated as read-only (payloads are copied
- * out before unmasking) and never holds a reference into a chunk the caller
- * gave us, so a caller that reuses its read buffer cannot corrupt a
- * half-decoded frame and we never pin a whole allocation slab.
+ * Incremental RFC 6455 frame decoder. Passive: it only observes bytes, so a decode
+ * failure degrades recording without ever corrupting relayed traffic.
  */
 export class WsFrameDecoder {
   private buffer: Buffer = EMPTY;
@@ -96,9 +81,8 @@ export class WsFrameDecoder {
     if (buf.length - start < 2) return 'incomplete';
 
     const fin = (buf[start] & 0x80) !== 0;
-    // The relay strips Sec-WebSocket-Extensions so permessage-deflate can never
-    // be negotiated. A set RSV bit means that assumption broke and the payload
-    // is compressed, which we must not record as if it were plaintext.
+    // The relay strips Sec-WebSocket-Extensions, so permessage-deflate can never be
+    // negotiated; a set RSV bit means that assumption broke and the payload is compressed.
     if ((buf[start] & 0x70) !== 0) return 'invalid';
     const rawOpcode = buf[start] & 0x0f;
     const masked = (buf[start + 1] & 0x80) !== 0;
@@ -114,9 +98,8 @@ export class WsFrameDecoder {
       offset += 2;
     } else {
       if (buf.length < offset + 8) return 'incomplete';
-      // Compared as BigInt: converting first would be lossy above 2^53.
-      // The 7-bit and 16-bit forms cannot exceed the cap, so this is the only
-      // length form that needs the check.
+      // Compared as BigInt (converting first would be lossy above 2^53); the 7-bit
+      // and 16-bit forms can't exceed the cap, so only this length form needs it.
       const big = buf.readBigUInt64BE(offset);
       if (big > BigInt(MAX_PAYLOAD_BYTES)) return 'invalid';
       payloadLength = Number(big);

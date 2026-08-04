@@ -26,6 +26,7 @@ interface ThrottlePutBody {
   latencyMs?: unknown;
 }
 
+/** Serializes a request record for JSON output, base64-encoding its binary body fields. */
 function serializeRecord(r: RequestRecord): Record<string, unknown> {
   return {
     ...r,
@@ -35,9 +36,9 @@ function serializeRecord(r: RequestRecord): Record<string, unknown> {
 }
 
 /**
- * `m.payload` is truthy for both a populated and a zero-length Buffer (it's
- * an object either way), so an empty payload correctly base64-encodes to ''
- * and only a genuinely absent (null) payload stays null.
+ * `m.payload` is truthy for both a populated and a zero-length Buffer, so
+ * an empty payload base64-encodes to '' and only a genuinely absent
+ * (null) payload stays null.
  */
 function serializeWsMessage(m: WebSocketMessage): Record<string, unknown> {
   return {
@@ -47,11 +48,9 @@ function serializeWsMessage(m: WebSocketMessage): Record<string, unknown> {
 }
 
 /**
- * Returns the parsed value, the fallback when the param is absent, or null
- * when present but not a non-negative integer. `0` is a deliberately valid
- * value distinct from "absent" — `?limit=0` means "give me zero rows" (still
- * reporting the true `total`), the same way `?offset=0` already means "start
- * at the beginning" rather than falling back to a default.
+ * Returns the parsed value, `fallback` when absent, or null when invalid.
+ * `0` is deliberately valid and distinct from absent, matching how
+ * `?limit=0` means zero rows and `?offset=0` means start-of-list.
  */
 function parsePositiveInt(raw: unknown, fallback: number): number | null {
   if (raw === undefined) return fallback;
@@ -63,21 +62,16 @@ function parsePositiveInt(raw: unknown, fallback: number): number | null {
 const MAX_REPLAY_FRAMES = 10_000;
 
 /**
- * Standard base64 — correct alphabet, correct length, correct padding.
- * `Buffer.from(s, 'base64')` silently discards anything it doesn't recognise,
- * so without this a payload like `"hello world!"` decodes to arbitrary bytes and
- * gets replayed as garbage.
+ * Standard base64 — correct alphabet, length, and padding. `Buffer.from(s,
+ * 'base64')` silently discards unrecognised characters, so a malformed
+ * payload would decode to arbitrary bytes and replay as garbage.
  */
 const BASE64 = /^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/;
 
 /**
- * Validates and normalises client-supplied replay frames, returning either the
- * frames or the reason they were refused.
- *
- * Everything checkable is checked here rather than left to fail mid-send: a
- * missing opcode, a payload that is not really base64, or a frame list long
- * enough to tie up the process would otherwise come back as a 200 whose `error`
- * field blames the connection for a client mistake.
+ * Validates client-supplied replay frames, checking everything upfront rather
+ * than failing mid-send — a bad opcode or oversized list would otherwise
+ * surface as a 200 that blames the connection.
  */
 function parseWsReplayFrames(raw: unknown): { frames: WsReplayFrame[] } | { error: string } {
   if (!Array.isArray(raw)) {
@@ -106,6 +100,7 @@ function parseWsReplayFrames(raw: unknown): { frames: WsReplayFrame[] } | { erro
   return { frames };
 }
 
+/** Callbacks the API router uses to control the underlying proxy process. */
 export interface ProxyControl {
   getProxyRunning: () => boolean;
   getProxyPort: () => number;
@@ -113,6 +108,7 @@ export interface ProxyControl {
   stopProxy: () => Promise<void>;
 }
 
+/** Builds the Express router wiring every REST endpoint to `db`, `events`, and the proxy/throttle controls. */
 export function createApiRouter(
   db: Database,
   events: EventManager,
@@ -133,11 +129,8 @@ export function createApiRouter(
     const filter: RequestFilter = {};
     if (req.query.host) filter.host = req.query.host as string;
     if (req.query.kind !== undefined) {
-      // Rejected rather than ignored: a caller that asked for one kind and
-      // silently received every kind has been given a wrong answer with nothing
-      // to indicate it. Every other filter here is a free-text or numeric match
-      // where a typo narrows the result; `kind` is a closed set, so a typo is
-      // knowable.
+      // Rejected, not ignored: unlike the free-text/numeric filters below,
+      // `kind` is a closed set, so a typo here is knowable rather than a silent no-op.
       if (req.query.kind !== 'http' && req.query.kind !== 'websocket') {
         res.status(400).json({ error: 'kind must be "http" or "websocket"' });
         return;
@@ -192,13 +185,8 @@ export function createApiRouter(
       res.status(400).json({ error: 'limit and offset must be non-negative integers' });
       return;
     }
-    // An unknown request id is treated the same as a known id with zero
-    // messages — an empty page, not a 404 — mirroring the plain `/requests`
-    // list endpoint, whose filters that match nothing also return `total: 0`
-    // rather than an error. Since a websocket connection with no captured
-    // frames yet is indistinguishable from a nonexistent id without an extra
-    // db.getById lookup this endpoint has no other reason to make, treating
-    // them alike keeps this a pure collection read.
+    // Unknown ids return an empty page, not a 404, matching how `/requests`
+    // treats filters with no matches — and skips an otherwise-unneeded db.getById lookup.
     const result = db.getWebSocketMessages(req.params.id as string, limit, offset);
     res.json({ ...result, data: result.data.map(serializeWsMessage) });
   });
@@ -269,9 +257,8 @@ export function createApiRouter(
       candidate = body;
     }
 
-    // One validator, shared with the config-file loader. A preset is a
-    // compile-time constant and cannot fail this, but routing it through anyway
-    // keeps a single point where settings become trusted.
+    // Shared with the config-file loader: a preset can't fail this, but routing
+    // it through anyway keeps one point where settings become trusted.
     const validated = validateThrottleSettings(candidate, throttler.getSettings());
     if ('error' in validated) {
       res.status(400).json({ error: validated.error });
@@ -279,14 +266,8 @@ export function createApiRouter(
     }
     const settings: ThrottleSettings = validated.settings;
 
-    // Nothing above mutates live state: a rejected request must leave both
-    // the running throttler and the persisted config untouched. Persist
-    // first, then apply to the live throttler only once the write has
-    // actually succeeded — the config file is the durable record, and an
-    // in-memory update() can't fail, so this ordering is the only one that
-    // can't leave disk and memory disagreeing. A restart after a failed
-    // write must not silently revert the settings the caller just saw
-    // applied; failing the request loudly is better than that.
+    // Persist before applying to the live throttler: update() can't fail, so
+    // this ordering is the only one that can't leave disk and memory disagreeing.
     try {
       saveThrottleSettings(settings);
     } catch (err) {
@@ -366,9 +347,8 @@ export function createApiRouter(
       return;
     }
 
-    // Both discriminators are type-checked, not just truthiness: a non-string
-    // id would reach better-sqlite3 as an unbindable value, and a non-string
-    // url would reach replayWebSocket's startsWith as a TypeError.
+    // Type-checked, not just truthy: a non-string id reaches better-sqlite3
+    // unbindable, and a non-string url reaches startsWith as a TypeError.
     let replayRequest: WsReplayRequest;
     if (typeof body.requestId === 'string' && body.requestId) {
       const record = db.getById(body.requestId);
@@ -381,22 +361,16 @@ export function createApiRouter(
         return;
       }
       const messages = db.getWebSocketMessages(body.requestId, MAX_REPLAY_FRAMES, 0);
-      // Refused rather than replayed in part: silently resending a prefix of a
-      // conversation would look like a completed replay. The count is of every
-      // recorded frame, both directions, so this is conservative — a refused
-      // connection might still have had few enough client frames to fit.
+      // Refused rather than replayed in part, since a partial resend would look like
+      // a completed replay. The frame count is both directions, so this is conservative.
       if (messages.total > messages.data.length) {
         res.status(400).json({
           error: `Connection has ${messages.total} recorded frames; replay handles at most ${MAX_REPLAY_FRAMES}`,
         });
         return;
       }
-      // A frame clipped at maxBodySize was recorded as a prefix of what the
-      // client really sent, with `truncated: 1` to say so. Resending that prefix
-      // delivers a corrupted message — truncated JSON, or text cut mid-codepoint
-      // — while the response would claim success, so refuse instead. Only the
-      // frames this replay would send matter: a clipped *server* reply says
-      // nothing about the fidelity of what we are about to send.
+      // A frame truncated at maxBodySize is a corrupted prefix (mid-codepoint
+      // text, broken JSON). Only client frames matter — a clipped server reply is fine.
       const truncated = messages.data.filter((m) => isReplayableFrame(m) && m.truncated !== 0);
       if (truncated.length > 0) {
         res.status(400).json({

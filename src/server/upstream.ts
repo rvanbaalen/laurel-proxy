@@ -101,10 +101,9 @@ export interface UpstreamRequestInit {
 }
 
 /**
- * Whether the response body arrived in full.
- *
- * `pending` until the body stream ends or fails — asking earlier gets an honest
- * "don't know yet" rather than a default that reads as success.
+ * Tri-state completion flag for a response body: `pending` until the stream
+ * ends or fails, so asking early gets an honest "don't know" instead of
+ * a default that reads as success.
  */
 export type BodyStatus =
   | { state: 'pending' }
@@ -115,9 +114,9 @@ export interface UpstreamResponse {
   /** What the origin actually spoke, for the caller to record. */
   protocol: NegotiatedProtocol;
   /**
-   * The status exactly as the origin stated it — including values no HTTP/1.1
-   * server writer would accept. Callers put `sendableStatus()` on the wire and
-   * this in the record; see `exchange.ts`.
+   * The status exactly as the origin stated it, including values no HTTP/1.1 writer
+   * would accept. Callers send `sendableStatus()` on the wire and this in
+   * the record; see `exchange.ts`.
    */
   status: number | undefined;
   /** Lowercased header names, `set-cookie` as an array: one shape for both protocols. */
@@ -131,9 +130,9 @@ export interface UpstreamOptions {
   /** How long a positive (`h2`) ALPN result is trusted. */
   h2TtlMs?: number;
   /**
-   * How long a negative (`http/1.1`) ALPN result is trusted. Deliberately much
-   * shorter than {@link h2TtlMs}: a cached negative is the entry that can pin an
-   * origin to HTTP/1.1 after it has gained h2 support, so it has to age out fast.
+   * How long a negative (`http/1.1`) ALPN result is trusted — deliberately much
+   * shorter than {@link h2TtlMs}, since a cached negative can pin an origin to
+   * HTTP/1.1 after it gains h2 support.
    */
   h1TtlMs?: number;
   /** Bound on the ALPN cache. Oldest entry is evicted first. */
@@ -161,15 +160,9 @@ const H2_FORBIDDEN = new Set([
 ]);
 
 /**
- * Error codes that mean "this request was definitively not processed".
- *
- * Retrying is only safe for these. `GOAWAY` names the last stream the origin
- * handled and Node raises `ERR_HTTP2_GOAWAY_SESSION` for streams above it, so
- * those never reached the application; the socket-level codes mean the bytes
- * never landed at all. `ERR_HTTP2_STREAM_ERROR` is *not* in the set — most of
- * its error codes (`INTERNAL_ERROR`, say) mean the origin did see the request,
- * and replaying a POST on that basis would duplicate side effects. The one
- * exception, `REFUSED_STREAM`, is matched by message below.
+ * Error codes that prove a request never reached the origin, and so are safe to retry.
+ * GOAWAY covers streams past the last one handled; socket resets mean the bytes
+ * never landed. REFUSED_STREAM is the exception, matched by message below.
  */
 const RETRYABLE_CODES = new Set([
   'ERR_HTTP2_GOAWAY_SESSION',
@@ -181,17 +174,9 @@ const RETRYABLE_CODES = new Set([
 ]);
 
 /**
- * Failures that condemn the whole session rather than one stream.
- *
- * The distinction matters in both directions: a session that is gone must leave
- * the pool, and a session that is fine must **stay** — a single reset stream
- * (`ERR_HTTP2_STREAM_ERROR`, or a stream closing before its response) says
- * nothing about the connection, and discarding the connection over it would
- * throw away every other request's multiplexing for nothing.
- *
- * The set is the same as {@link RETRYABLE_CODES} today, but for a different
- * reason, so they are not one constant: "the origin never processed this" and
- * "this connection is finished" are separate questions that will diverge.
+ * Failures that condemn the whole session rather than one stream — a single
+ * reset stream says nothing about the connection's health. Same codes as
+ * RETRYABLE_CODES today, kept separate since the reasons will diverge.
  */
 const SESSION_LEVEL_CODES = new Set([
   'ERR_HTTP2_GOAWAY_SESSION',
@@ -212,12 +197,9 @@ export class UpstreamTruncatedError extends Error {
 }
 
 /**
- * Raised when h2 turns out not to be usable with an origin we believed spoke it:
- * a stale positive cache entry, an origin that negotiated something else, or a
- * handshake that never completed. All three mean "forget the verdict and take
- * the HTTP/1.1 path", which is strictly more forgiving than failing the request —
- * and if the origin is simply unreachable, the HTTP/1.1 attempt fails exactly as
- * it does today.
+ * Raised when h2 turns out unusable for an origin believed to speak it: a stale cache
+ * entry, a renegotiation, or an incomplete handshake — all three fall back to
+ * HTTP/1.1 instead of failing the request.
  */
 class H2UnavailableError extends Error {
   readonly code = 'ERR_UPSTREAM_H2_UNAVAILABLE';
@@ -247,13 +229,9 @@ function originKey(hostname: string, port: number): string {
 }
 
 /**
- * Request headers translated for HTTP/2.
- *
- * Pseudo-headers first (HTTP/2 requires it), names lowercased, `Host` folded
- * into `:authority`, and every connection-specific header dropped. Getting this
- * wrong is not a bad response: `session.request()` throws
- * `ERR_HTTP2_INVALID_CONNECTION_HEADERS` synchronously, which is why it is a
- * separate, separately-tested function.
+ * Translates request headers for HTTP/2: pseudo-headers first, names lowercased,
+ * `Host` folded into `:authority`, connection-specific headers dropped. Getting
+ * this wrong throws synchronously, hence its own tested function.
  */
 export function toH2RequestHeaders(
   target: UpstreamTarget,
@@ -290,11 +268,9 @@ export function toH2RequestHeaders(
 }
 
 /**
- * Response headers in the shape the HTTP/1.1 path produces.
- *
- * `:status` and any other pseudo-header are removed rather than passed through:
- * the recording layer and `writeHead` must see one format, and a literal
- * `:status` header would be rejected on the way back out to the client.
+ * Converts h2 response headers into the shape the HTTP/1.1 path produces: `:status`
+ * and other pseudo-headers are stripped, since the recording layer and
+ * `writeHead` need one format either way.
  */
 export function fromH2ResponseHeaders(headers: http2.IncomingHttpHeaders): {
   status: number | undefined;
@@ -311,11 +287,9 @@ export function fromH2ResponseHeaders(headers: http2.IncomingHttpHeaders): {
 }
 
 /**
- * Whether a response is defined to have no body, in which case a
- * `content-length` says nothing about how many bytes should arrive.
- *
- * Verifying length on these would report every `HEAD` and every `304` as
- * truncated — a false positive is as bad as a false negative here.
+ * Whether a response is defined to have no body, where `content-length` says nothing
+ * about the bytes that should arrive. Verifying length here would flag every
+ * HEAD and 304 as truncated — a false positive as bad as a miss.
  */
 function bodylessResponse(method: string, status: number | undefined): boolean {
   if (method.toUpperCase() === 'HEAD') return true;
@@ -370,23 +344,9 @@ export function countingBody(
   let received = 0;
   let state: BodyStatus = { state: 'pending' };
 
-  // The recording invariant's blind spot, closed. `fail()` below destroys `out`
-  // with an error, and a stream that emits 'error' with no listener is an
-  // *uncaught exception* — not a rejection — so `dispatchExchange`'s `.catch()`
-  // structurally cannot see it, and nothing in `src/` installs an
-  // `uncaughtException` handler. The window is not theoretical: `handleExchange`
-  // resolves this response, then awaits `throttle.delayLatency()` (tens to
-  // hundreds of milliseconds under `laurel-proxy throttle 3g`) and only then
-  // starts iterating. An origin that resets inside that window used to take the
-  // proxy with it — one uncaught exception per exchange, measured against a real
-  // `node:http2` origin.
-  //
-  // Listening changes nothing else. A consumer that arrives later still throws:
-  // Node's async iterator rejects from `stream.errored`, which is recorded on the
-  // stream itself rather than delivered only to whoever was listening at the time.
-  // `bodyStatus()` still says `truncated`, with the same reason. The HTTP/1.1 path
-  // has had the symmetric listener from the start (`h1Request` attaches
-  // `res.on('error', …)`), which is the only reason it was never exposed to this.
+  // A stream 'error' event with no listener is an uncaught exception, not a
+  // rejection; this keeps that from ending the process. A late consumer still
+  // sees the failure via the rejected iterator and `bodyStatus()`.
   out.on('error', () => {});
 
   const complete = () => {
@@ -395,9 +355,8 @@ export function countingBody(
     out.end();
   };
   const fail = (reason: string) => {
-    // A body already verified complete must still be *delivered*: `out` may hold
-    // buffered bytes the caller has not read yet, and destroying it here would
-    // turn a complete response into a truncated one on the way out.
+    // A body already verified complete must still be delivered — destroying `out`
+    // here would turn a complete response into a truncated one on its way out.
     if (state.state === 'complete') return;
     if (state.state === 'pending') {
       state = { state: 'truncated', reason };
@@ -413,13 +372,8 @@ export function countingBody(
   out.on('drain', () => source.resume());
 
   source.on('end', () => {
-    // `end` is not proof of completion. When a session or socket dies, Node
-    // closes each of its streams with `CANCEL` and then pushes `null`, so the
-    // readable ends with no error at all — measured on Node 22.21.1. `rstCode`
-    // is assigned in `closeStream` before that push, so it is already set here,
-    // and it is the difference between "the origin finished" and "something cut
-    // this off". Zero covers both a clean end and the undetectable
-    // `RST_STREAM(NO_ERROR)` case documented at the top of this file.
+    // `end` alone isn't proof of completion: `rstCode` is set before Node pushes
+    // the closing null, so it distinguishes a clean finish from a cut-off one.
     if (source.rstCode) {
       fail(`stream reset with code ${source.rstCode} after ${received} bytes`);
       return;
@@ -464,15 +418,9 @@ export class UpstreamTransport {
   private alpn = new Map<string, AlpnEntry>();
   private sessions = new Map<string, PooledSession>();
   /**
-   * Probes and connects already under way, keyed like the caches they will fill.
-   *
-   * Without these, both {@link negotiate} and {@link acquireSession} read a map
-   * and then await, so every request that arrives before the first one finishes
-   * misses the cache and starts its own work: measured at 20 TCP connections and
-   * 10 h2 sessions for 10 concurrent requests to a cold origin — *worse* than the
-   * `node:https` code this replaced, and precisely the shape of a browser page
-   * load, the burst the pooling exists for. Sharing the in-flight promise is what
-   * makes the cache a cache rather than a same-request memo.
+   * Probes and connects already under way, keyed like the caches they'll fill. Without
+   * this, concurrent callers to a cold origin all miss the cache before the first
+   * fill lands — measured at 20 connections for 10 concurrent requests.
    */
   private alpnInFlight = new Map<string, Promise<NegotiatedProtocol>>();
   private sessionInFlight = new Map<string, Promise<PooledSession>>();
@@ -507,10 +455,8 @@ export class UpstreamTransport {
       pooled.session.destroy();
     }
     this.alpn.clear();
-    // In-flight work needs no cancelling: a probe socket is `unref`'d and gets
-    // destroyed by its own `finish`, and a handshake that completes after this
-    // sees `closed` and destroys the session it just made. Dropping the entries
-    // only keeps a post-close caller from being handed a session that is gone.
+    // In-flight work needs no cancelling: a probe socket is unref'd and self-destroys,
+    // and a handshake that settles after this checks `closed` and destroys its session.
     this.alpnInFlight.clear();
     this.sessionInFlight.clear();
   }
@@ -541,14 +487,9 @@ export class UpstreamTransport {
   // ---- HTTP/1.1 ------------------------------------------------------------
 
   /**
-   * The pre-existing path, deliberately unchanged.
-   *
-   * The `http.IncomingMessage` is handed back as the body stream rather than
-   * being wrapped: Node's HTTP/1.1 client already destroys the response with
-   * `ECONNRESET` on a premature close (verified for both `content-length` and
-   * chunked framing) and already tracks completeness in `res.complete`, so a
-   * wrapper would add risk to a load-bearing path and buy nothing. The
-   * asymmetry is internal; callers see the same interface either way.
+   * Hands back the `http.IncomingMessage` as the body stream unwrapped: Node's HTTP/1.1
+   * client already destroys it with `ECONNRESET` on a premature close and tracks
+   * completeness via `res.complete`, so wrapping would add risk for nothing.
    */
   private async h1Request(init: UpstreamRequestInit): Promise<UpstreamResponse> {
     const { target, method, headers, body } = init;
@@ -559,8 +500,7 @@ export class UpstreamTransport {
       path: target.path,
       method,
       headers,
-      // Deliberate and pre-existing: an intercepting proxy cannot verify origin
-      // certificates on the user's behalf. Out of scope here.
+      // An intercepting proxy cannot verify origin certificates on the user's behalf.
       ...(target.protocol === 'https' ? { rejectUnauthorized: false } : {}),
     };
 
@@ -584,13 +524,8 @@ export class UpstreamTransport {
       headers: res.headers,
       body: res,
       bodyStatus: () => {
-        // Order matters, and it is completeness first. `res.complete` is Node's
-        // own verdict on whether the whole message arrived; a captured `failure`
-        // only explains *why* one did not. Asking about the failure first meant a
-        // late 'error' on a response that had already arrived in full would report
-        // `truncated` and cost a perfectly good record. Nothing reaches that state
-        // on the same tick today — which is exactly why the ordering should say
-        // what it means rather than rely on that continuing to hold.
+        // Completeness first: `res.complete` is Node's own verdict on whether the
+        // message arrived in full; a captured failure only explains why it didn't.
         if (!res.readableEnded && !res.destroyed) return { state: 'pending' };
         if (res.complete) return { state: 'complete' };
         if (failure !== null) return { state: 'truncated', reason: failure };
@@ -615,20 +550,16 @@ export class UpstreamTransport {
 
     const probe = (async () => {
       const probed = await this.probeAlpn(target);
-      // A failed probe is not evidence about the origin's protocols — it is
-      // usually the origin being unreachable. Caching it would let one bad moment
-      // pin the origin, so we don't, and the HTTP/1.1 attempt that follows fails
-      // exactly as it does today.
+      // A failed probe usually just means the origin is unreachable, not evidence
+      // about its protocols, so it isn't cached — one bad moment shouldn't pin it.
       if (probed === null) return 'http/1.1';
       this.rememberAlpn(key, probed);
       return probed;
     })();
 
     this.alpnInFlight.set(key, probe);
-    // The verdict is cached *inside* the promise, before it settles, so anyone
-    // arriving after this cleanup reads the cache instead. `then(fn, fn)` rather
-    // than `finally`: the promise `finally` returns would reject on its own and
-    // become the unhandled rejection this module exists to avoid.
+    // Cached inside the promise before it settles, so late arrivals read the cache.
+    // `then(fn, fn)` avoids `finally`, whose returned promise could reject unseen.
     const forget = () => {
       if (this.alpnInFlight.get(key) === probe) this.alpnInFlight.delete(key);
     };
@@ -693,17 +624,14 @@ export class UpstreamTransport {
       } catch (err) {
         if (err instanceof H2UnavailableError) throw err;
         const { session } = pooled.entry;
-        // Only condemn the connection when the connection is what failed. A
-        // single bad stream leaves the session pooled and multiplexing for
-        // everyone else — see SESSION_LEVEL_CODES.
+        // Only condemn the connection when the connection itself failed — a single
+        // bad stream leaves the session pooled and multiplexing for everyone else.
         if (SESSION_LEVEL_CODES.has(errorCode(err)) || session.closed || session.destroyed) {
           this.dropSession(key, session, false);
         }
-        // The whole point of the retry: a session can die between the request
-        // that last used it and this one, and the request that discovers the
-        // corpse must not be the one that pays for it. Only once, only for a
-        // reused session, and only for failures that prove the origin never saw
-        // the request — see RETRYABLE_CODES.
+        // Retries once, only for a reused session, and only for failures that prove
+        // the origin never saw the request — the caller who finds a dead session
+        // shouldn't pay for it.
         if (reused && attempted === 0 && isRetryable(err)) {
           attempted += 1;
           continue;
@@ -741,16 +669,13 @@ export class UpstreamTransport {
       };
       stream.once('close', release);
 
-      // Errors before the response belong to this promise; after it they belong
-      // to the body stream, where `countingBody` is already watching for them.
-      // This listener stays attached either way, so a late error can never be an
-      // unhandled 'error' event — which would end the process.
+      // Stays attached for the stream's life so a late error is always caught here
+      // or by `countingBody`, never as an unhandled 'error' event.
       stream.on('error', (err: Error) => {
         if (!handedOff) reject(err);
       });
-      // A close without a response is always a failure, whatever the reset code.
-      // Some codes (`NO_ERROR`, `CANCEL`) do not produce an 'error' event at all,
-      // so without this the promise would simply never settle.
+      // Some reset codes (`NO_ERROR`, `CANCEL`) never emit 'error' at all, so
+      // without this a close before a response would leave the promise unsettled.
       stream.once('close', () => {
         if (!handedOff) {
           reject(new UpstreamTruncatedError(
@@ -796,17 +721,13 @@ export class UpstreamTransport {
       this.dropSession(key, pooled.session, false);
     }
 
-    // One handshake per cold origin, shared by everyone who wants it. `reused`
-    // stays false for all of them, which is the honest answer: a brand-new
-    // session that fails is not the stale-corpse case the retry exists for.
+    // One handshake per cold origin, shared by all callers; `reused` stays false
+    // since a brand-new session failing isn't the stale-corpse case the retry exists for.
     const running = this.sessionInFlight.get(key);
     if (running) {
       const joined = await running;
-      // Re-check what we joined. An origin that sends GOAWAY straight after the
-      // preface (graceful restart, max-requests-per-connection) marks the entry
-      // draining before the joiners use it, and `reused: false` suppresses the
-      // retry — so without this one unlucky handshake becomes N failed requests.
-      // The pooled path above checks the same three conditions for this reason.
+      // Re-checked because a session can start draining (GOAWAY right after connect)
+      // before joiners use it; `reused: false` here correctly suppresses the retry.
       if (!joined.session.closed && !joined.session.destroyed && !joined.draining) {
         return { entry: joined, reused: false };
       }
@@ -846,26 +767,22 @@ export class UpstreamTransport {
       }, this.opts.connectTimeoutMs);
       timer.unref?.();
 
-      // An unhandled 'error' on a session ends the process, and a pooled session
-      // outlives every request that used it — so this is attached for the
-      // session's whole life, not just the handshake.
+      // Attached for the session's whole life, not just the handshake: an
+      // unhandled 'error' on a pooled session would otherwise end the process.
       session.on('error', (err: Error) => {
         this.dropSession(key, session, false);
         if (settled) return;
         settled = true;
         clearTimeout(timer);
-        // A stale positive lands here: `http2.connect` offers only `h2`, so an
-        // origin that has stopped supporting it fails the TLS handshake with
-        // NO_APPLICATION_PROTOCOL rather than negotiating something else.
+        // A stale positive lands here: `http2.connect` offers only h2, so an origin
+        // that dropped support fails the handshake with NO_APPLICATION_PROTOCOL.
         reject(errorCode(err).includes('ALERT_NO_APPLICATION_PROTOCOL')
           ? new H2UnavailableError(`origin ${key} no longer offers h2`)
           : err);
       });
       session.on('close', () => this.dropSession(key, session, false));
-      // GOAWAY means no *new* streams, while in-flight ones may still finish. So
-      // the session leaves the pool but is not destroyed; `release` disposes of
-      // it once the last stream is done. Callers of in-flight streams see their
-      // response through to the end — or an error, if the origin cuts it short.
+      // GOAWAY blocks new streams only; the session leaves the pool but stays alive
+      // so in-flight streams can finish, and `release` disposes of it once the last one does.
       session.on('goaway', () => {
         const entry = this.sessions.get(key);
         if (entry?.session === session) {
@@ -888,15 +805,8 @@ export class UpstreamTransport {
         }
         const entry: PooledSession = { session, active: 0, draining: false };
         this.evictIfFull();
-        // Whatever is being displaced has to be closed on the way out. `set`
-        // alone drops the previous entry's only reference, putting a live session
-        // beyond the reach of the map `close()` iterates — a leak that keeps
-        // origin sockets open and hangs `Http2Server.close()` in a consumer's
-        // test harness. Graceful, because a displaced session may still have
-        // streams in flight and they are entitled to finish; the same choice
-        // `evictIfFull` makes. The in-flight map above should make this
-        // unreachable for concurrent cold starts, which is exactly why it is
-        // handled rather than assumed away.
+        // `set` alone would drop the previous session's only reference and leak it;
+        // close() is graceful since a displaced session may still have streams in flight.
         const displaced = this.sessions.get(key);
         if (displaced && displaced.session !== session) {
           this.sessions.delete(key);

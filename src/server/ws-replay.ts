@@ -12,8 +12,8 @@ const DEFAULT_TIMEOUT = 30_000;
 const QUIET_PERIOD = 500;
 
 /**
- * The recorded frames a replay resends: the client's own data frames. Exported
- * so a caller deciding whether a recording is fit to replay asks about the same
+ * The recorded frames a replay resends: the client's own data frames. Exported so
+ * a caller deciding whether a recording is fit to replay asks about the same
  * frames this module would send, rather than re-deriving the predicate.
  */
 export function isReplayableFrame(message: WebSocketMessage): boolean {
@@ -22,12 +22,9 @@ export function isReplayableFrame(message: WebSocketMessage): boolean {
 }
 
 /**
- * Build a replay request from a recorded connection: client-sent data frames
- * only, with delays derived from the original inter-frame gaps.
- *
- * Control frames (ping/pong/close) are dropped — Node's WebSocket manages those
- * itself — and so is everything the server sent, which is what replay collects
- * rather than resends.
+ * Builds a replay request from a recording: the client's data frames, with delays derived
+ * from their original gaps. Drops control frames, which the WebSocket API manages
+ * itself, and server replies, which replay collects rather than resends.
  */
 export function recordToWsReplayRequest(
   record: RequestRecord,
@@ -37,11 +34,8 @@ export function recordToWsReplayRequest(
   // `^http:` cannot match an `https:` URL, so the order of these two is safe.
   const url = record.url.replace(/^http:/, 'ws:').replace(/^https:/, 'wss:');
 
-  // Filtered before the gaps are measured, so each delay is the wait between
-  // two frames this replay actually sends. Measuring across dropped frames
-  // would shorten every gap that had a reply or a ping in it. `sort` is stable,
-  // so frames decoded from one chunk — which share a timestamp — keep their
-  // recorded order.
+  // Filtered before gaps are measured, so each delay reflects only sent frames.
+  // `sort` is stable, so frames decoded from one chunk keep their recorded order.
   const sent = messages
     .filter(isReplayableFrame)
     .sort((a, b) => a.timestamp - b.timestamp);
@@ -95,15 +89,12 @@ export function replayWebSocket(request: WsReplayRequest): Promise<WsReplayRespo
     let settled = false;
     let sendingComplete = false;
     let quietTimer: ReturnType<typeof setTimeout> | null = null;
-    // Declared before `finish` closes over it rather than after: a `const`
-    // below would leave `finish` reading a binding in its temporal dead zone,
-    // safe only for as long as nobody moves a handler above the assignment.
+    // Declared before `finish` closes over it; a `const` here would leave
+    // `finish` reading the binding in its temporal dead zone.
     let hardTimer: ReturnType<typeof setTimeout> | null = null;
 
-    // A malformed URL makes the constructor throw, which rejects this promise —
-    // that happens before any timer exists, so there is nothing to clean up.
-    // `binaryType` is set immediately, since it only governs messages that
-    // arrive after it is assigned.
+    // A malformed URL throws in the constructor, rejecting this promise before
+    // any timer exists — there is nothing to clean up yet.
     const socket = new WebSocket(request.url);
     socket.binaryType = 'arraybuffer';
 
@@ -116,9 +107,8 @@ export function replayWebSocket(request: WsReplayRequest): Promise<WsReplayRespo
       resolve({
         sentCount,
         frameCount: request.frames.length,
-        // Derived from the counts rather than from `sendingComplete`, so a
-        // replay with nothing to send is complete even when the socket never
-        // opened — `frames: []` did send everything it was asked to.
+        // Derived from the counts, not `sendingComplete`, so a replay with nothing
+        // to send counts as complete even when the socket never opened.
         sentAll: sentCount === request.frames.length,
         received,
         durationMs: Date.now() - startedAt,
@@ -131,18 +121,15 @@ export function replayWebSocket(request: WsReplayRequest): Promise<WsReplayRespo
     hardTimer = setTimeout(() => finish('timeout', 'Replay timed out'), timeoutMs);
 
     const armQuietTimer = () => {
-      // Silence only means "the server is done" once we have stopped talking.
-      // Arming this from a reply that arrives while frames are still queued
-      // would end the replay in the middle of a recorded gap longer than the
-      // quiet period — a short sentCount reported as a clean run.
+      // Meaningful only once we've stopped sending; arming it while frames are
+      // still queued could end the replay mid-gap, misread as a clean run.
       if (!sendingComplete) return;
       if (quietTimer) clearTimeout(quietTimer);
       quietTimer = setTimeout(() => finish('idle'), QUIET_PERIOD);
     };
 
-    // Anything that throws inside an async handler becomes an unhandled
-    // rejection that never settles this promise — the caller would hang until
-    // the hard timeout with no explanation. Catch and finish explicitly.
+    // An uncaught throw here becomes an unhandled rejection, not a settled
+    // promise, leaving the caller hanging until the hard timeout.
     socket.onopen = async () => {
       try {
         for (const frame of request.frames) {
@@ -177,9 +164,8 @@ export function replayWebSocket(request: WsReplayRequest): Promise<WsReplayRespo
       armQuietTimer();
     };
 
-    // Captured before `finish` resolves, so a server-initiated close reports
-    // its code. `finish` is idempotent, so it does not matter that a close
-    // following our own `socket.close()` calls it a second time.
+    // Captured before `finish` resolves, so a server-initiated close still
+    // reports its code; `finish`'s idempotence covers the resulting double call.
     socket.onclose = (event: CloseEvent) => {
       closeCode = event.code;
       finish('close');

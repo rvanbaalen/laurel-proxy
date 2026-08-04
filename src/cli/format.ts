@@ -75,47 +75,36 @@ function agentSummary(r: RequestRecord): string {
 }
 
 /**
- * The `kind` an agent (or a table row) should be told about.
- *
- * Defaulted rather than passed through: `kind` is optional on `RequestRecord` and
- * absent on every row written before the column existed, and `undefined` in
- * agent output would read as "unknown" for what is really an ordinary HTTP
- * request.
+ * The `kind` an agent or table row is told about, defaulting the optional
+ * `RequestRecord.kind` field so rows written before the column existed,
+ * so `undefined` would misread as unknown.
  */
 function recordKind(r: RequestRecord): RequestKind {
   return r.kind ?? 'http';
 }
 
 /**
- * A compact marker for the traffic that is not an ordinary HTTP request.
- *
- * Only non-HTTP rows are tagged: a `kind` column carrying "http" on almost every
- * row would cost width on the format that is read by eye and say nothing. A
- * WebSocket handshake's method is always GET, so prefixing the method cell adds no
- * column and hides nothing.
+ * A compact marker for non-HTTP traffic. Tagging every row http would cost width in this
+ * eye-read table for nothing; a WebSocket handshake's method is always GET, so
+ * prefixing it adds no column.
  */
 function kindMarker(r: RequestRecord): string {
   return recordKind(r) === 'websocket' ? `${pc.cyan('WS')} ` : '';
 }
 
 /**
- * A compact marker for a client hop that negotiated h2.
- *
- * Only h2 is tagged, matching `kindMarker`'s "only the non-default is worth a
- * character" rule — the default (http/1.1, or unknown) is left blank rather
- * than spelled out. Never co-occurs with `kindMarker`'s `WS` tag: a WebSocket
- * connection's client hop is h1.1 by construction (see `websocket.ts`), so
- * the two markers never compete for the same column width.
+ * A compact marker for a client hop that negotiated h2. Only h2 is tagged, matching
+ * `kindMarker`'s default-stays-blank rule; never co-occurs with the `WS` tag,
+ * since a WebSocket's client hop is always h1.1 (see `websocket.ts`).
  */
 function protocolMarker(r: RequestRecord): string {
   return r.client_protocol === 'h2' ? `${pc.magenta('H2')} ` : '';
 }
 
 /**
- * A wire-protocol value for display, distinguishing "unknown" from a guessed
- * default. `client_protocol`/`origin_protocol` are `null`/absent only when
- * genuinely not known (see the field docs in `src/shared/types.ts`) — never
- * silently rendering that as `'http/1.1'` is the whole point of the field.
+ * A wire-protocol value for display, distinguishing unknown from a guessed
+ * default. `client_protocol`/`origin_protocol` are `null` only when
+ * genuinely not known — never render that as `'http/1.1'`.
  */
 function wireProtocolLabel(value: RequestRecord['client_protocol']): string {
   return value === 'h2' || value === 'http/1.1' ? value : 'unknown';
@@ -125,18 +114,14 @@ function toAgentRecord(r: RequestRecord) {
   return {
     summary: agentSummary(r),
     /**
-     * Without this an agent cannot tell a WebSocket connection from an HTTP
-     * request, and so cannot discover which id to hand to
-     * `laurel-proxy messages <id>` — the capture feature would have no
-     * agent-side entry point.
+     * Without this an agent cannot tell a WebSocket connection from an HTTP request,
+     * so it could not discover which id to hand to `laurel-proxy messages`.
      */
     kind: recordKind(r),
     /**
-     * The two hops an h2 exchange has, exposed independently so an agent can
-     * spot the case a plain `protocol` (URL scheme) field could never show:
-     * an h2 client talking to an HTTP/1.1-only origin. `null` means genuinely
-     * unknown and must be read as such, not as "http/1.1" — see
-     * `RequestRecord.client_protocol`.
+     * The two hops an h2 exchange has, exposed independently so an agent can spot an
+     * h2 client talking to an HTTP/1.1-only origin; `null` means genuinely
+     * unknown, not http/1.1 — see `RequestRecord.client_protocol`.
      */
     client_protocol: r.client_protocol ?? null,
     origin_protocol: r.origin_protocol ?? null,
@@ -229,14 +214,9 @@ export function formatRequests(result: PaginatedResponse<RequestRecord>, format:
 }
 
 /**
- * One `label   value` line of a request's meta block.
- *
- * The padding is computed rather than typed out because it was typed out: the two
- * longest labels, `Client Hop` and `Origin Hop`, were padded to a different width
- * from every other row, so their values sat one character off. `META_LABEL_WIDTH`
- * is two wider than the longest label so that the next one added is aligned by
- * construction — and if it ever exceeds the width, the value keeps a single space
- * rather than running into the label.
+ * Label-column width for a meta-block `label   value` line, sized two wider than the longest
+ * label (`Client Hop`/`Origin Hop`) so every line aligns by construction, with
+ * a single-space fallback if a longer label is added.
  */
 const META_LABEL_WIDTH = 12;
 
@@ -354,7 +334,7 @@ function formatBytes(bytes: number): string {
   return `${(bytes / (1024 * 1024)).toFixed(1)}MB`;
 }
 
-// ── Replay response formatter (moved from cli/commands/replay.ts) ──
+// ── Replay response formatter ──
 
 export function formatReplayResponse(response: ReplayResponse, format: string): string {
   if (format === 'json') {
@@ -444,7 +424,6 @@ export function formatDiff(original: RequestRecord, replayResponse: ReplayRespon
     }, null, 2);
   }
 
-  // Table/default format
   const lines: string[] = [''];
 
   if (truncatedWarning) {
@@ -454,7 +433,6 @@ export function formatDiff(original: RequestRecord, replayResponse: ReplayRespon
 
   lines.push(`  ${pc.bold('DIFF:')} ${original.method} ${original.url}`);
 
-  // Status
   const origStatusStr = `${original.status ?? '?'} ${original.status ? httpStatusText(original.status) : ''}`.trim();
   const replayStatusStr = `${replayResponse.status} ${httpStatusText(replayResponse.status)}`.trim();
   if (statusChanged) {
@@ -463,21 +441,18 @@ export function formatDiff(original: RequestRecord, replayResponse: ReplayRespon
     lines.push(`  ${pc.dim('status:')}  ${statusColor(original.status)}  ${pc.dim('[unchanged]')}`);
   }
 
-  // Body
   if (bodyChanged) {
     lines.push(`  ${pc.dim('body:')}    ${pc.yellow('[CHANGED]')}`);
   } else {
     lines.push(`  ${pc.dim('body:')}    ${pc.dim('[unchanged]')}`);
   }
 
-  // Timing
   if (original.duration != null) {
     lines.push(`  ${pc.dim('timing:')}  ${original.duration}ms ${pc.dim('->')} ${replayResponse.duration}ms`);
   }
 
   lines.push('');
 
-  // Result
   const resultLabels: Record<DiffResult, string> = {
     improved: pc.green('IMPROVED') + ' (status changed from error to success)',
     regressed: pc.red('REGRESSED') + ' (status changed from success to error)',
@@ -539,26 +514,18 @@ export function formatThrottleSettings(
 // ── WebSocket message formatters ──
 
 /**
- * Only a 'text' opcode is guaranteed by RFC 6455 to carry valid UTF-8.
- * 'binary' frames and control frames ('ping'/'pong'/'close') carry arbitrary
- * application bytes (a close frame's payload even starts with a 2-byte
- * numeric status code) — decoding those as UTF-8 can produce mojibake or
- * silently mangle bytes that aren't valid UTF-8. The REST API already
- * base64-encodes every opcode unconditionally for exactly this reason (see
- * `serializeWsMessage` in server/api.ts); CLI output must stay consistent
- * with that and state which encoding it used, rather than leaving a consumer
- * to guess from the key name alone.
+ * Only a 'text' opcode is RFC 6455-guaranteed valid UTF-8; other opcodes carry arbitrary bytes.
+ * The REST API already base64-encodes every opcode for this reason (see `serializeWsMessage`
+ * in server/api.ts); CLI output stays consistent with that.
  */
 function wsPayloadEncoding(opcode: WebSocketMessage['opcode']): 'utf8' | 'base64' {
   return opcode === 'text' ? 'utf8' : 'base64';
 }
 
 /**
- * Decodes a frame's payload for a full collection record (json/agent),
- * tagging the encoding used. Kept full (not truncated) — a consumer parsing
- * JSON may be matching on payload content, so silently clipping it would be
- * worse than a large value; `truncated` (storage-side clipping) is reported
- * separately and untouched here.
+ * Decodes a frame's payload for a full collection record (json/agent), tagging the encoding
+ * used; kept full rather than truncated, since a JSON consumer may match on
+ * payload content, and clipping would be worse than a large value.
  */
 function encodeWsMessageForOutput(m: WebSocketMessage): Record<string, unknown> {
   const encoding = wsPayloadEncoding(m.opcode);
@@ -571,10 +538,9 @@ function encodeWsMessageForOutput(m: WebSocketMessage): Record<string, unknown> 
 }
 
 /**
- * Same decoding as `encodeWsMessageForOutput`, but for a single streamed
- * line (`--follow`). Deliberately omits `id`/`request_id`: a `--follow`
- * session already filters to one connection, so repeating them on every
- * line would be redundant.
+ * Same decoding as `encodeWsMessageForOutput`, for a single streamed `--follow` line;
+ * omits `id`/`request_id` since a follow session already filters to one
+ * connection, so repeating them per line would be redundant.
  */
 function encodeWsMessageLineForOutput(message: WebSocketMessage): Record<string, unknown> {
   const encoding = wsPayloadEncoding(message.opcode);
@@ -596,11 +562,9 @@ const WS_CONTROL_ESCAPES: Record<number, string> = {
 };
 
 /**
- * Neutralizes C0 control characters (including ESC, 0x7f DEL) before a
- * decoded payload reaches the terminal. A captured frame is untrusted
- * data — printing it raw would let an embedded ANSI escape sequence
- * repaint/hide the terminal, and an embedded newline would break the
- * one-line-per-message table layout this formatter promises.
+ * Neutralizes C0 control characters, including ESC and 0x7f DEL, before a decoded payload
+ * reaches the terminal. A captured frame is untrusted data: printing it raw
+ * could let an escape repaint the terminal or a newline break this layout.
  */
 function escapeWsControlChars(text: string): string {
   let out = '';
@@ -618,9 +582,7 @@ function escapeWsControlChars(text: string): string {
 /** Single-line, terminal-safe preview of a frame's payload for table format. */
 function wsPayloadPreview(message: WebSocketMessage, maxLength = 120): string {
   if (!message.payload) return '';
-  // Only 'text' frames are safe to decode and display as UTF-8; binary and
-  // control frames (ping/pong/close) carry arbitrary bytes, so show their
-  // size instead of attempting a decode that could produce garbage.
+  // Binary/control frames carry arbitrary bytes; decoding as UTF-8 could produce garbage.
   if (message.opcode !== 'text') return `<${message.size} bytes>`;
   const buf = Buffer.from(message.payload);
   const text = buf.toString('utf8');
@@ -639,11 +601,8 @@ export function formatWsMessages(
     if (format === 'agent') {
       const sent = result.data.filter((m) => m.direction === 'sent').length;
       const received = result.data.length - sent;
-      // The total is collection-scoped and the breakdown is page-scoped, so the
-      // summary has to say which is which. It previously read
-      // "1200 messages captured (350 sent, 150 received)" for a 1200-frame
-      // connection read at the default limit of 500 — three numbers that cannot
-      // all describe the same set of frames, with nothing to say so.
+      // total is collection-scoped, sent/received are page-scoped — say so explicitly
+      // rather than implying all three numbers describe the same set of frames.
       output.summary =
         `${result.total} message${result.total === 1 ? '' : 's'} captured; `
         + `showing ${result.data.length} (offset ${result.offset}): `
@@ -652,17 +611,13 @@ export function formatWsMessages(
     return JSON.stringify(output, null, 2);
   }
 
-  // The page footer, in the same shape `formatRequests` has always used. A header
-  // saying "1200 messages" above 500 rows presents a page as the whole
-  // collection; the reader needs both numbers to know there is more to fetch.
+  // Shows total alongside the page size so a header doesn't present a page as the whole collection.
   const pageNote = pc.dim(
     `${result.total} total (showing ${result.data.length}, offset ${result.offset})`,
   );
 
   if (result.data.length === 0) {
-    // An offset past the end, or `--limit 0`, is a paging outcome rather than an
-    // empty connection. Reporting it as "no messages captured" would describe a
-    // choice the caller made as an absence of traffic.
+    // An offset past the end, or `--limit 0`, is a paging outcome, not an empty connection.
     if (result.total === 0) {
       return `\n  ${pc.dim('No messages captured for this connection.')}\n`;
     }

@@ -14,10 +14,9 @@ function expandHome(filePath: string): string {
 }
 
 /**
- * Resolve the config file location. Honours LAUREL_PROXY_CONFIG so tests (and
- * later, the REST endpoint that persists throttle settings) can redirect
- * config I/O to a temp file instead of touching the developer's real
- * ~/.laurel-proxy/config.json.
+ * Resolves the config file path, honouring `LAUREL_PROXY_CONFIG` so tests
+ * and the throttle-settings endpoint can redirect config I/O away from
+ * the real `~/.laurel-proxy/config.json`.
  */
 export function getConfigPath(): string {
   return expandHome(process.env.LAUREL_PROXY_CONFIG ?? '~/.laurel-proxy/config.json');
@@ -49,16 +48,17 @@ function parseDuration(value: string): number {
  * Validates the config file's `throttle` block, falling back to
  * `DEFAULT_THROTTLE` on anything it cannot trust.
  *
- * `PUT /api/throttle` has type-checked these fields since the fix that stopped
- * `"false"` from silently enabling throttling; the config file — which
- * `docs/throttling.md` documents as a user-facing surface — had no equivalent and
- * copied `raw.throttle` straight through. A `NaN` or `null` rate then reached the
- * limiter, which short-circuits on it, leaving traffic completely unthrottled
- * while `GET /api/throttle` and the UI pill both reported enabled.
+ * `PUT /api/throttle` type-checks these fields before they reach the limiter;
+ * the config file — documented in `docs/throttling.md` as a user-facing
+ * surface — does not, and copies `raw.throttle` straight through. An
+ * untrusted `NaN` or `null` rate reaching the limiter short-circuits it,
+ * leaving traffic unthrottled while `GET /api/throttle` and the UI pill
+ * both report enabled.
  *
- * Falling back wholesale rather than field by field: a block that contains one
- * unusable value is not a block whose other values have earned trust, and
- * "throttling off" is the one outcome that cannot silently misreport itself.
+ * Falling back wholesale rather than field by field: a block that contains
+ * one unusable value is not a block whose other values have earned trust,
+ * and "throttling off" is the one outcome that cannot silently misreport
+ * itself.
  */
 function parseFileThrottle(raw: unknown): ThrottleSettings | undefined {
   if (raw === undefined) return undefined;

@@ -42,22 +42,15 @@ export function neverFatal(work: () => void): void {
   try {
     work();
   } catch {
-    // Deliberately silent. Every channel available for reporting this — the
-    // database, the event stream — is itself bookkeeping and could be the thing
-    // that just failed. There is no logging channel in this codebase to fall
-    // back to; giving these failures a voice is a tracked follow-up, and a
-    // silent loss is still better than a dead proxy.
+    // Silent on purpose: the only channels for reporting this — the database,
+    // the event stream — are themselves bookkeeping and could be what failed.
   }
 }
 
 /**
- * {@link neverFatal} at the recording boundary specifically: capturing an
- * exchange, building its record, and handing it to a sink.
- *
- * This exists as a separate name so the boundary stays enumerable —
- * `grep -rn recordSafely src/` lists every place a recording failure is
- * absorbed, and nothing else. `neverFatal` covers work that is not a recording
- * (retention pruning), which is why the two names are not one.
+ * {@link neverFatal} for the recording boundary: builds an exchange record and
+ * hands it to a sink. Named separately so `grep -rn recordSafely src/`
+ * finds every recording failure, apart from retention pruning.
  */
 export function recordSafely(record: () => void): void {
   neverFatal(record);

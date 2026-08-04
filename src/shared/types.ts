@@ -18,18 +18,9 @@ export interface RequestRecord {
   truncated: number;
   kind?: RequestKind;
   /**
-   * The wire protocol negotiated with the **client** — independent of
-   * {@link RequestRecord.protocol}, which is the URL scheme, not a wire
-   * protocol, and unrelated to what the origin spoke (see `origin_protocol`).
-   * An h2 client in front of an HTTP/1.1-only origin is a normal case, not an
-   * edge case, which is why the two hops each get their own field.
-   *
-   * `null`/absent means genuinely unknown, e.g. a row captured before this
-   * field existed. Every current record site sets this explicitly to a real
-   * value, so a null here is a signal, not a default — display code must
-   * render it as "unknown", never silently as `'http/1.1'`. See the migration
-   * note in `src/storage/db.ts` for why historical rows get a real value
-   * instead of null.
+   * Wire protocol negotiated with the **client**; independent of {@link RequestRecord.protocol}
+   * (the URL scheme) and of `origin_protocol`, which covers the other hop of the exchange.
+   * `null`/absent means genuinely unknown, never a silent default of `'http/1.1'`.
    */
   client_protocol?: WireProtocol | null;
   /**
@@ -43,11 +34,9 @@ export interface RequestRecord {
 export type RequestKind = 'http' | 'websocket';
 
 /**
- * The wire protocol actually spoken on one hop of an exchange, as distinct
- * from {@link RequestRecord.protocol} (the URL scheme). Named to match
- * `NegotiatedProtocol` in `src/server/upstream.ts` — kept as a separate
- * declaration here rather than imported, since this file is shared with
- * browser code and that one pulls in `node:http2` types.
+ * Wire protocol actually spoken on one hop, distinct from {@link RequestRecord.protocol}
+ * (the URL scheme). Named to match `NegotiatedProtocol` in `src/server/upstream.ts`;
+ * kept separate since this file (shared with browser code) can't use `node:http2`.
  */
 export type WireProtocol = 'http/1.1' | 'h2';
 
@@ -122,18 +111,15 @@ export interface ProxyStatus {
 export interface RequestFilter {
   host?: string;
   /**
-   * 'http' matches a NULL `kind` too: the column arrived by migration, and a row
-   * that predates it — or one written around `bindRecord` — reads back NULL
-   * rather than 'http'. Excluding those from both filters would make a row
-   * visible unfiltered and invisible filtered, which is worse than either answer.
+   * 'http' matches a NULL `kind` too: rows predating the migration, or written
+   * around `bindRecord`, read back NULL rather than 'http'; excluding NULL
+   * from both filters would hide such a row only when filtered.
    */
   kind?: RequestKind;
   /**
-   * Exact match against `client_protocol`/`origin_protocol`. Unlike `kind`,
-   * a `null` column value never matches either filter value: nothing in this
-   * codebase legitimately produces a `null` protocol going forward (every
-   * record site sets one), so a `null` row is an anomaly, not a case that
-   * deserves to be folded into a known value the way a pre-`kind` row is.
+   * Exact match against `client_protocol`/`origin_protocol`, unlike `kind`'s
+   * NULL-tolerant match: no current write path produces a `null` protocol,
+   * so such a row is an anomaly, not folded into a known value.
    */
   clientProtocol?: WireProtocol;
   originProtocol?: WireProtocol;
@@ -180,10 +166,9 @@ export interface WsReplayRequest {
 }
 
 /**
- * Why a replay stopped. A WebSocket has no response boundary, so this is the
- * only thing that distinguishes "the server finished" from "we stopped waiting":
- * `idle` means the quiet period elapsed, which may simply mean the server was
- * slower to answer than the quiet period allows.
+ * Why a replay stopped. A WebSocket has no response boundary, so this is the only
+ * signal distinguishing "the server finished" from "we gave up waiting": `idle`
+ * may just mean the server was slower to answer than the quiet period allows.
  */
 export type WsReplayStopReason = 'idle' | 'close' | 'timeout' | 'error';
 
@@ -193,19 +178,14 @@ export interface WsReplayResponse {
   /** Frames the replay was asked to send, so `sentCount` has a denominator. */
   frameCount: number;
   /**
-   * Whether every requested frame went out.
-   *
-   * `stoppedBecause` cannot answer this on its own: a server that closes after
-   * the first of three frames stops the replay with `'close'` and a `sentCount`
-   * of 1, which is indistinguishable from a clean run unless the caller
-   * re-counts the frames it passed in. Anything reporting a verdict on a replay
-   * must consult this before calling the result a success — a partial send
-   * reported as success is the failure this field exists to make impossible.
+   * Whether every requested frame actually went out — `stoppedBecause` alone can't tell,
+   * since closing after 1 of 3 frames also reports `'close'`, just like a
+   * clean run. Consult this before calling a replay a success.
    */
   sentAll: boolean;
   /**
-   * Server frames, in arrival order. `payload` is base64 for both opcodes,
-   * matching `GET /api/requests/:id/messages`. `offsetMs` is measured from the
+   * Server frames, in arrival order. `payload` is base64 for both opcodes, matching
+   * `GET /api/requests/:id/messages`. `offsetMs` is measured from the
    * start of the replay, so it includes connection setup.
    */
   received: { opcode: 'text' | 'binary'; payload: string; offsetMs: number }[];

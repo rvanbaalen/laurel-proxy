@@ -8,10 +8,9 @@ import type { WebSocketMessage } from '../../shared/types.js';
 const VALID_FORMATS = ['json', 'table', 'agent'];
 
 /**
- * Reports a failure respecting --format, matching the convention established
- * in commands/throttle.ts: plain text on stderr for humans, a JSON object on
- * stdout for --format json/agent, so a script or AI agent always gets
- * parseable output on a failure path, not just on success.
+ * Reports a failure respecting --format: plain text on stderr for humans, a
+ * JSON object on stdout for --format json/agent, matching commands/
+ * throttle.ts.
  */
 function reportError(message: string, format: string): void {
   if (format === 'json' || format === 'agent') {
@@ -22,8 +21,8 @@ function reportError(message: string, format: string): void {
 }
 
 /**
- * Stream ws-message SSE events for one connection. Exported so an
- * integration test can drive it against a real event stream, the same
+ * Streams ws-message SSE events for one connection to stdout. Exported so
+ * an integration test can drive it against a real event stream, the same
  * reason commands/throttle.ts exports `api`.
  */
 export function followMessages(port: number, requestId: string, format: string): void {
@@ -38,13 +37,8 @@ export function followMessages(port: number, requestId: string, format: string):
       res.on('data', (chunk: Buffer) => {
         buffer += chunk.toString();
 
-        // Parse SSE events from the buffer. A `data:` line is a single-line
-        // JSON.stringify()'d object, so it can never contain a literal
-        // newline (JSON.stringify escapes control characters, including the
-        // base64/utf8 payload string) — splitting on the blank-line
-        // separator can't misfire on payload content. An event split across
-        // two TCP chunks is handled by only consuming complete `\n\n`-
-        // delimited parts and carrying the remainder into the next chunk.
+        // A `data:` line can't contain a literal newline (JSON.stringify
+        // escapes control chars), so splitting on blank lines is safe.
         const parts = buffer.split('\n\n');
         buffer = parts.pop() || '';
         for (const part of parts) {
@@ -56,11 +50,9 @@ export function followMessages(port: number, requestId: string, format: string):
           }
           if (eventType !== 'ws-message' || !data) continue;
           try {
-            // The server base64-encodes `payload` for every opcode
-            // unconditionally (see serializeWsMessage in server/api.ts) —
-            // decode back to a Buffer here so formatWsMessageLine can
-            // re-derive the right text/base64 encoding per opcode, exactly
-            // as it does for a message read straight from the database.
+            // Server always base64-encodes payload (serializeWsMessage in
+            // server/api.ts); decode to Buffer so formatWsMessageLine can
+            // re-derive text/base64 per opcode, as it does for a DB read.
             const raw = JSON.parse(data) as WebSocketMessage & { payload: string | null };
             if (raw.request_id !== requestId) continue;
             console.log(
@@ -87,6 +79,7 @@ export function followMessages(port: number, requestId: string, format: string):
   req.end();
 }
 
+/** Registers the `messages` command on the CLI program. */
 export function registerMessages(program: Command): void {
   program
     .command('messages <id>')
@@ -103,12 +96,9 @@ export function registerMessages(program: Command): void {
         return;
       }
 
-      // Resolve the id (and confirm it names a WebSocket connection) via the
-      // database up front, for both the non-follow and --follow paths. A
-      // typo'd or non-WebSocket id would otherwise make --follow wait
-      // silently forever on a stream that can never emit a matching event,
-      // and a non-follow read against a plain HTTP request id would print
-      // an uninformative "No messages captured" instead of explaining why.
+      // Validated up front for both paths: a typo'd or non-WebSocket id
+      // would otherwise hang --follow forever, or print an uninformative
+      // empty result for a plain HTTP request id.
       const config = loadConfig(opts.dbPath ? { dbPath: opts.dbPath } : {});
       const db = new Database(config.dbPath);
       const record = db.getById(id);
