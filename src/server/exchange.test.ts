@@ -745,4 +745,68 @@ describe('handleExchange', () => {
       proxyServer.close();
     }
   });
+
+  it('destroys the upstream body when the relay loop is never reached', async () => {
+    // Only the relay loop consumes the upstream body, so anything that throws
+    // between the response resolving and that loop leaks it. For h2 this is not
+    // just an unread stream: `countingBody` pauses its source, holding the
+    // flow-control window open, so the session's graceful idle close cannot
+    // complete and the real bound becomes the origin's own timeout.
+    const body = Readable.from([Buffer.from('never relayed')]);
+    const upstream: UpstreamRequester = {
+      request: async (): Promise<UpstreamResponse> => ({
+        protocol: 'h2',
+        status: 200,
+        headers: { 'content-type': 'text/plain' },
+        body,
+        bodyStatus: () => ({ state: 'complete' }) as BodyStatus,
+      }),
+    };
+    // Stands in for anything in that window failing. `delayLatency` is the real
+    // one with a shipped timer behind it, which is why it is the chosen vector.
+    const throttle = {
+      delayLatency: async () => {
+        throw new Error('injected latency failure');
+      },
+      down: { consume: async () => {} },
+      up: { consume: async () => {} },
+    } as unknown as Throttler;
+
+    const onRecord = vi.fn();
+    const proxyServer = http.createServer((clientReq, clientRes) => {
+      const target = resolveHttpTarget(`http://127.0.0.1:1${clientReq.url}`);
+      if (!target) {
+        clientRes.writeHead(400);
+        clientRes.end();
+        return;
+      }
+      void handleExchange(clientReq, clientRes, target, {
+        config: DEFAULT_CONFIG,
+        onRecord,
+        upstream,
+        throttle,
+      }).catch(() => failExchange(clientRes));
+    });
+    await new Promise<void>((resolve) => proxyServer.listen(0, '127.0.0.1', () => resolve()));
+    const proxyPort = (proxyServer.address() as net.AddressInfo).port;
+
+    try {
+      const status = await new Promise<number>((resolve) => {
+        const req = http.request({ host: '127.0.0.1', port: proxyPort, path: '/leak' }, (res) => {
+          res.on('data', () => {});
+          res.on('end', () => resolve(res.statusCode ?? 0));
+        });
+        req.on('error', () => resolve(0));
+        req.end();
+      });
+
+      // The behaviour that was already correct: the client still gets a 502 and
+      // nothing is recorded. The fix only adds the cleanup.
+      expect(status).toBe(502);
+      expect(onRecord).not.toHaveBeenCalled();
+      expect(body.destroyed).toBe(true);
+    } finally {
+      proxyServer.close();
+    }
+  });
 });

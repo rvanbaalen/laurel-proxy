@@ -416,17 +416,29 @@ export async function handleExchange(
     return;
   }
 
-  // Inject configured latency once per exchange, before the first response
-  // byte reaches the client — this must not run per-chunk inside the
-  // streaming loop below.
-  await deps.throttle?.delayLatency();
+  // Nothing consumes the upstream body until the relay loop below, so anything
+  // that throws in between leaks it. For HTTP/2 that is not merely an unread
+  // stream: `countingBody` pauses its source, which holds the flow-control
+  // window open, so the session's graceful idle close cannot complete and the
+  // real bound becomes the origin's own timeout. Destroy it explicitly.
+  try {
+    // Inject configured latency once per exchange, before the first response
+    // byte reaches the client — this must not run per-chunk inside the
+    // streaming loop below.
+    await deps.throttle?.delayLatency();
 
-  // The status on the wire is coerced to what a response writer will accept; the
-  // record below keeps what upstream actually said. See `sendableStatus`.
-  clientRes.writeHead(
-    sendableStatus(proxyRes.status, deps.clientProtocol),
-    relayResponseHeaders(proxyRes.headers, deps.clientProtocol),
-  );
+    // The status on the wire is coerced to what a response writer will accept; the
+    // record below keeps what upstream actually said. See `sendableStatus`.
+    clientRes.writeHead(
+      sendableStatus(proxyRes.status, deps.clientProtocol),
+      relayResponseHeaders(proxyRes.headers, deps.clientProtocol),
+    );
+  } catch (err) {
+    // Rethrow so the dispatch site still answers the client with a 502, exactly
+    // as before — this only adds the cleanup that was missing.
+    proxyRes.body.destroy();
+    throw err;
+  }
 
   const captured: Buffer[] = [];
   let capturedLength = 0;
