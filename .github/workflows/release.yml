@@ -46,7 +46,7 @@ jobs:
       # Without this the OIDC exchange is never attempted and publish fails.
       - run: npm install -g npm@latest
 
-      - run: npm ci --legacy-peer-deps
+      - run: npm ci
 
       - run: npm run build
 
