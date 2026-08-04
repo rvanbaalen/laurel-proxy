@@ -5,13 +5,16 @@ on:
     branches:
       - main
 
-permissions:
-  contents: write
-  pull-requests: write
+# Scoped per job rather than workflow-wide: release-please needs write access to
+# open its PR, while publish needs id-token to mint an OIDC token and nothing else.
+permissions: {}
 
 jobs:
   release-please:
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
     outputs:
       release_created: ${{ steps.release.outputs.release_created }}
       tag_name: ${{ steps.release.outputs.tag_name }}
@@ -25,13 +28,23 @@ jobs:
     needs: release-please
     if: ${{ needs.release-please.outputs.release_created }}
     runs-on: ubuntu-latest
+    permissions:
+      # Required for npm trusted publishing (OIDC). Without this the publish
+      # falls back to looking for a token and fails with a misleading 404.
+      id-token: write
+      contents: read
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v5
         with:
+          # Trusted publishing requires Node >= 22.14.0.
           node-version: 22
           registry-url: https://registry.npmjs.org
+
+      # Node 22 ships npm 10.x, but trusted publishing needs npm >= 11.5.1.
+      # Without this the OIDC exchange is never attempted and publish fails.
+      - run: npm install -g npm@latest
 
       - run: npm ci --legacy-peer-deps
 
@@ -39,6 +52,7 @@ jobs:
 
       - run: npm test
 
+      # No NODE_AUTH_TOKEN: trusted publishing exchanges the OIDC token for a
+      # short-lived credential. A token here would take precedence and defeat it.
+      # Provenance is generated automatically — no --provenance flag needed.
       - run: npm publish
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
