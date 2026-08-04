@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.3.2](https://github.com/rvanbaalen/laurelproxy/compare/laurel-proxy-v0.3.1...laurel-proxy-v0.3.2) (2026-08-04)
+
+
+### Features
+
+* **storage:** migrate from better-sqlite3 to node:sqlite ([#17](https://github.com/rvanbaalen/laurelproxy/issues/17)) ([aded322](https://github.com/rvanbaalen/laurelproxy/commit/aded322116fef5a8a8ef0c6c5fe44d7a9174b211))
+
 ## [0.3.1](https://github.com/rvanbaalen/laurelproxy/compare/laurel-proxy-v0.3.0...laurel-proxy-v0.3.1) (2026-08-04)
 
 
