@@ -38,12 +38,13 @@ jobs:
 
       - uses: actions/setup-node@v7
         with:
-          # Trusted publishing requires Node >= 22.14.0.
-          node-version: 22
+          # node:sqlite needs Node >= 24 to run without --experimental-sqlite;
+          # also comfortably satisfies trusted publishing's Node >= 22.14.0.
+          node-version: 24
           registry-url: https://registry.npmjs.org
 
-      # Node 22 ships npm 10.x, but trusted publishing needs npm >= 11.5.1.
-      # Without this the OIDC exchange is never attempted and publish fails.
+      # The shipped npm needs to be >= 11.5.1 for trusted publishing's OIDC
+      # exchange to be attempted at all — without this, publish just fails.
       - run: npm install -g npm@latest
 
       - run: npm ci

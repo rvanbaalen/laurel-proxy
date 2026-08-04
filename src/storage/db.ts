@@ -1,4 +1,4 @@
-import BetterSqlite3 from 'better-sqlite3';
+import { DatabaseSync, type SQLInputValue } from 'node:sqlite';
 import type {
   RequestRecord,
   RequestFilter,
@@ -8,19 +8,21 @@ import type {
 import fs from 'node:fs';
 
 export class Database {
-  private db: BetterSqlite3.Database;
+  private db: DatabaseSync;
 
   constructor(dbPath: string) {
     const dir = dbPath.substring(0, dbPath.lastIndexOf('/'));
     if (dir) fs.mkdirSync(dir, { recursive: true });
 
-    this.db = new BetterSqlite3(dbPath);
-    this.db.pragma('journal_mode = WAL');
+    this.db = new DatabaseSync(dbPath);
+    this.db.exec('PRAGMA journal_mode = WAL');
 
     // auto_vacuum can only be set on a fresh DB; convert existing ones with a one-time VACUUM
-    const currentMode = this.db.pragma('auto_vacuum', { simple: true }) as number;
+    const currentMode = (
+      this.db.prepare('PRAGMA auto_vacuum').get() as { auto_vacuum: number }
+    ).auto_vacuum;
     if (currentMode !== 2) {
-      this.db.pragma('auto_vacuum = INCREMENTAL');
+      this.db.exec('PRAGMA auto_vacuum = INCREMENTAL');
       this.db.exec('VACUUM');
     }
 
@@ -79,7 +81,7 @@ export class Database {
    * construction, so it must not throw against an up-to-date db.
    */
   private migrate(): void {
-    const columns = this.db.pragma('table_info(requests)') as { name: string }[];
+    const columns = this.db.prepare('PRAGMA table_info(requests)').all() as { name: string }[];
     if (!columns.some((c) => c.name === 'kind')) {
       this.db.exec(`ALTER TABLE requests ADD COLUMN kind TEXT DEFAULT 'http'`);
     }
@@ -106,13 +108,38 @@ export class Database {
    * that failure visible instead of papering over it with a plausible-looking
    * default.
    */
-  private bindRecord(record: RequestRecord): Record<string, unknown> {
+  private bindRecord(record: RequestRecord): Record<string, SQLInputValue> {
     return {
       ...record,
       kind: record.kind ?? 'http',
       client_protocol: record.client_protocol ?? null,
       origin_protocol: record.origin_protocol ?? null,
     };
+  }
+
+  /**
+   * node:sqlite has no `better-sqlite3`-style `.transaction()` wrapper, so
+   * batched writes roll their own BEGIN/COMMIT/ROLLBACK.
+   */
+  private transaction<T>(fn: () => T): T {
+    this.db.exec('BEGIN');
+    try {
+      const result = fn();
+      this.db.exec('COMMIT');
+      return result;
+    } catch (err) {
+      this.db.exec('ROLLBACK');
+      throw err;
+    }
+  }
+
+  /**
+   * node:sqlite reads BLOB columns back as `Uint8Array`, not `Buffer` here
+   * so every downstream consumer converts once at the boundary instead
+   * of repeating it at each call site.
+   */
+  private static toBuffer(value: unknown): Buffer | null {
+    return value == null ? null : Buffer.from(value as Uint8Array);
   }
 
   insert(record: RequestRecord): void {
@@ -146,12 +173,11 @@ export class Database {
         @duration, @content_type, @truncated, @kind, @client_protocol, @origin_protocol
       )
     `);
-    const insertMany = this.db.transaction((records: RequestRecord[]) => {
+    this.transaction(() => {
       for (const record of records) {
         stmt.run(this.bindRecord(record));
       }
     });
-    insertMany(records);
   }
 
   insertWebSocketMessages(messages: WebSocketMessage[]): void {
@@ -163,10 +189,9 @@ export class Database {
         @id, @request_id, @timestamp, @direction, @opcode, @payload, @size, @truncated
       )
     `);
-    const insertMany = this.db.transaction((rows: WebSocketMessage[]) => {
-      for (const row of rows) stmt.run(row);
+    this.transaction(() => {
+      for (const row of messages) stmt.run(row as unknown as Record<string, SQLInputValue>);
     });
-    insertMany(messages);
   }
 
   getWebSocketMessages(
@@ -186,18 +211,32 @@ export class Database {
         `SELECT * FROM websocket_messages WHERE request_id = @requestId
          ORDER BY timestamp ASC, rowid ASC LIMIT @limit OFFSET @offset`,
       )
-      .all({ requestId, limit, offset }) as WebSocketMessage[];
-    return { data, total, limit, offset };
+      .all({ requestId, limit, offset }) as unknown as WebSocketMessage[];
+    return {
+      data: data.map((row) => ({ ...row, payload: Database.toBuffer(row.payload) })),
+      total,
+      limit,
+      offset,
+    };
   }
 
   getById(id: string): RequestRecord | null {
     const stmt = this.db.prepare('SELECT * FROM requests WHERE id = ?');
-    return (stmt.get(id) as RequestRecord) ?? null;
+    const row = stmt.get(id) as RequestRecord | undefined;
+    return row ? this.mapRequestRow(row) : null;
+  }
+
+  private mapRequestRow(row: RequestRecord): RequestRecord {
+    return {
+      ...row,
+      request_body: Database.toBuffer(row.request_body),
+      response_body: Database.toBuffer(row.response_body),
+    };
   }
 
   query(filter: RequestFilter): PaginatedResponse<RequestRecord> {
     const conditions: string[] = [];
-    const params: Record<string, unknown> = {};
+    const params: Record<string, SQLInputValue> = {};
 
     if (filter.host) {
       conditions.push('host LIKE @host');
@@ -275,9 +314,9 @@ export class Database {
     const dataStmt = this.db.prepare(
       `SELECT * FROM requests ${where} ORDER BY timestamp DESC LIMIT @limit OFFSET @offset`
     );
-    const data = dataStmt.all({ ...params, limit, offset }) as RequestRecord[];
+    const data = dataStmt.all({ ...params, limit, offset }) as unknown as RequestRecord[];
 
-    return { data, total, limit, offset };
+    return { data: data.map((row) => this.mapRequestRow(row)), total, limit, offset };
   }
 
   deleteAll(): void {
@@ -295,7 +334,9 @@ export class Database {
          (SELECT id FROM requests WHERE timestamp < ?)`,
       )
       .run(timestampMs);
-    return this.db.prepare('DELETE FROM requests WHERE timestamp < ?').run(timestampMs).changes;
+    return Number(
+      this.db.prepare('DELETE FROM requests WHERE timestamp < ?').run(timestampMs).changes,
+    );
   }
 
   deleteOldest(limit: number): number {
@@ -312,8 +353,9 @@ export class Database {
     this.db
       .prepare(`DELETE FROM websocket_messages WHERE request_id IN (${placeholders})`)
       .run(...ids);
-    return this.db.prepare(`DELETE FROM requests WHERE id IN (${placeholders})`).run(...ids)
-      .changes;
+    return Number(
+      this.db.prepare(`DELETE FROM requests WHERE id IN (${placeholders})`).run(...ids).changes,
+    );
   }
 
   /**
@@ -335,16 +377,18 @@ export class Database {
    * anything, which is the exact failure it exists to fix.
    */
   deleteOrphanedWebSocketMessages(): number {
-    return this.db
-      .prepare(
-        `DELETE FROM websocket_messages WHERE NOT EXISTS
-         (SELECT 1 FROM requests WHERE requests.id = websocket_messages.request_id)`,
-      )
-      .run().changes;
+    return Number(
+      this.db
+        .prepare(
+          `DELETE FROM websocket_messages WHERE NOT EXISTS
+           (SELECT 1 FROM requests WHERE requests.id = websocket_messages.request_id)`,
+        )
+        .run().changes,
+    );
   }
 
   incrementalVacuum(): void {
-    this.db.pragma('incremental_vacuum');
+    this.db.exec('PRAGMA incremental_vacuum');
   }
 
   getRequestCount(): number {
@@ -353,8 +397,10 @@ export class Database {
   }
 
   getDbSize(): number {
-    const pageCount = this.db.pragma('page_count', { simple: true }) as number;
-    const pageSize = this.db.pragma('page_size', { simple: true }) as number;
+    const pageCount = (this.db.prepare('PRAGMA page_count').get() as { page_count: number })
+      .page_count;
+    const pageSize = (this.db.prepare('PRAGMA page_size').get() as { page_size: number })
+      .page_size;
     return pageCount * pageSize;
   }
 

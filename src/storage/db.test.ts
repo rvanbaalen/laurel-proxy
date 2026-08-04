@@ -5,7 +5,7 @@ import type { RequestRecord } from '../shared/types.js';
 import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
-import BetterSqlite3 from 'better-sqlite3';
+import { DatabaseSync } from 'node:sqlite';
 
 function makeRequest(overrides: Partial<RequestRecord> = {}): RequestRecord {
   return {
@@ -129,7 +129,7 @@ describe('Database', () => {
     // that bypasses `bindRecord` can hold NULL. `kind = 'http'` would silently
     // exclude it from both filters, which is worse than either answer: the row
     // would exist in an unfiltered list and vanish from every filtered one.
-    const raw = new BetterSqlite3(dbPath);
+    const raw = new DatabaseSync(dbPath);
     raw.prepare(
       `INSERT INTO requests (id, timestamp, method, url, host, path, protocol, kind)
        VALUES ('null-kind', 1, 'GET', 'http://n/x', 'n', '/x', 'http', NULL)`,
@@ -325,7 +325,7 @@ describe('Database', () => {
     // `bindRecord`), so it must not silently satisfy an 'http/1.1' filter —
     // that would be the exact "unknown reported as known" failure this
     // project singles out.
-    const raw = new BetterSqlite3(dbPath);
+    const raw = new DatabaseSync(dbPath);
     raw.prepare(
       `INSERT INTO requests (id, timestamp, method, url, host, path, protocol, client_protocol, origin_protocol)
        VALUES ('null-protocol', 1, 'GET', 'http://n/x', 'n', '/x', 'http', NULL, NULL)`,
@@ -342,7 +342,7 @@ describe('Database', () => {
     // an existing user's database right before this feature landed.
     const legacyPath = path.join(os.tmpdir(), `laurel-proxy-legacy-protocol-${randomUUID()}.db`);
     try {
-      const legacy = new BetterSqlite3(legacyPath);
+      const legacy = new DatabaseSync(legacyPath);
       legacy.exec(`
         CREATE TABLE requests (
           id TEXT PRIMARY KEY, timestamp INTEGER NOT NULL, method TEXT NOT NULL,
@@ -395,7 +395,7 @@ describe('Database', () => {
   it('migrates a database created without the kind column', () => {
     const legacyPath = path.join(os.tmpdir(), `laurel-proxy-legacy-${randomUUID()}.db`);
     try {
-      const legacy = new BetterSqlite3(legacyPath);
+      const legacy = new DatabaseSync(legacyPath);
       legacy.exec(`
         CREATE TABLE requests (
           id TEXT PRIMARY KEY, timestamp INTEGER NOT NULL, method TEXT NOT NULL,
@@ -513,7 +513,7 @@ describe('Database', () => {
     // SQLite allows NULL in a non-INTEGER PRIMARY KEY column, so `requests` can
     // hold a NULL id. A `NOT IN (SELECT id FROM requests)` sweep would evaluate
     // to NULL for every row and reclaim nothing at all; `NOT EXISTS` is immune.
-    const raw = new BetterSqlite3(dbPath);
+    const raw = new DatabaseSync(dbPath);
     try {
       raw.prepare(
         `INSERT INTO requests (id, timestamp, method, url, host, path, protocol)
