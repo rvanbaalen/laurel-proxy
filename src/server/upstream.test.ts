@@ -187,6 +187,66 @@ describe('UpstreamTransport', () => {
       transport.close();
     }
   });
+
+  /**
+   * Coalescing means concurrent cold starts share one handshake — but a joiner
+   * inherits whatever that handshake produced. An origin that sends GOAWAY
+   * immediately after the preface (graceful restart, max-requests-per-connection)
+   * marks the entry draining before the joiners resume, and since `reused` is
+   * false for them the retry-once path is deliberately suppressed. Without a
+   * re-check that turns one unlucky handshake into N failed requests, which is
+   * strictly worse than the pre-coalescing behaviour where each request had its
+   * own session.
+   */
+  it('does not hand a joined caller a session that died during the handshake', async () => {
+    let connects = 0;
+    const connect = () => {
+      connects += 1;
+      const session = new EventEmitter() as unknown as http2.ClientHttp2Session;
+      Object.assign(session, {
+        alpnProtocol: 'h2',
+        closed: false,
+        destroyed: false,
+        close: () => Object.assign(session, { closed: true }),
+        destroy: () => Object.assign(session, { destroyed: true }),
+        ref: () => session,
+        unref: () => session,
+        setTimeout: () => session,
+      });
+      // Only the first handshake dies. `goaway` is emitted synchronously after
+      // `connect`, so the entry is marked draining before either caller's
+      // continuation runs — the exact race a joiner would otherwise inherit.
+      const dies = connects === 1;
+      setImmediate(() => {
+        session.emit('connect');
+        if (dies) session.emit('goaway');
+      });
+      return session;
+    };
+
+    const transport = new UpstreamTransport({ connect });
+    const acquireSession = (
+      transport as unknown as {
+        acquireSession(key: string, target: UpstreamTarget): Promise<{ reused: boolean }>;
+      }
+    ).acquireSession.bind(transport);
+
+    try {
+      // Both in flight at once, so the second takes the join path rather than
+      // the pooled path (which already re-checks).
+      await Promise.all([
+        acquireSession('example.com:443', target),
+        acquireSession('example.com:443', target),
+      ]);
+
+      // Two handshakes: the joiner refused the draining entry and made its own.
+      // Without the re-check this is 1, and the joiner would go on to call
+      // `session.request()` on a session that only answers ERR_HTTP2_GOAWAY_SESSION.
+      expect(connects).toBe(2);
+    } finally {
+      transport.close();
+    }
+  });
 });
 
 describe('countingBody', () => {

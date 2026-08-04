@@ -800,7 +800,18 @@ export class UpstreamTransport {
     // stays false for all of them, which is the honest answer: a brand-new
     // session that fails is not the stale-corpse case the retry exists for.
     const running = this.sessionInFlight.get(key);
-    if (running) return { entry: await running, reused: false };
+    if (running) {
+      const joined = await running;
+      // Re-check what we joined. An origin that sends GOAWAY straight after the
+      // preface (graceful restart, max-requests-per-connection) marks the entry
+      // draining before the joiners use it, and `reused: false` suppresses the
+      // retry — so without this one unlucky handshake becomes N failed requests.
+      // The pooled path above checks the same three conditions for this reason.
+      if (!joined.session.closed && !joined.session.destroyed && !joined.draining) {
+        return { entry: joined, reused: false };
+      }
+      // Fall through to a fresh handshake rather than handing back a corpse.
+    }
 
     const connecting = this.connectSession(key, target);
     this.sessionInFlight.set(key, connecting);
