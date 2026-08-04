@@ -87,6 +87,7 @@ export function replayWebSocket(request: WsReplayRequest): Promise<WsReplayRespo
     let sentCount = 0;
     let closeCode: number | null = null;
     let settled = false;
+    let opened = false;
     let sendingComplete = false;
     let quietTimer: ReturnType<typeof setTimeout> | null = null;
     // Declared before `finish` closes over it; a `const` here would leave
@@ -131,6 +132,7 @@ export function replayWebSocket(request: WsReplayRequest): Promise<WsReplayRespo
     // An uncaught throw here becomes an unhandled rejection, not a settled
     // promise, leaving the caller hanging until the hard timeout.
     socket.onopen = async () => {
+      opened = true;
       try {
         for (const frame of request.frames) {
           if (settled) return;
@@ -171,8 +173,11 @@ export function replayWebSocket(request: WsReplayRequest): Promise<WsReplayRespo
       finish('close');
     };
 
-    // Fires both for a connection that never opened and for one that broke
-    // mid-replay, hence the wording: `sentCount` says which happened.
-    socket.onerror = () => finish('error', `WebSocket connection to ${request.url} failed`);
+    // Node 24's WebSocket also fires `error` for an abrupt disconnect after a
+    // successful open — an undici bug, not a real failure — so once opened,
+    // only the `close` that always follows (with the real code) settles it.
+    socket.onerror = () => {
+      if (!opened) finish('error', `WebSocket connection to ${request.url} failed`);
+    };
   });
 }

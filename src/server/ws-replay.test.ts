@@ -287,9 +287,9 @@ describe('replayWebSocket', () => {
   }, 20_000);
 
   it('reports an abrupt disconnect as an abnormal close', async () => {
-    // No close handshake at all. Node's WebSocket reports this as close 1006
-    // without an error event, so `stoppedBecause` is 'close' and the code is
-    // what tells a reader the connection was cut rather than closed.
+    // No close handshake at all. `close` (code 1006) is what makes this
+    // read as a cut connection rather than a clean one — an `error` event
+    // may also fire once opened (see `ws-replay.ts`), but must not win.
     const server = await startRawWsServer({ onOpen: (socket) => socket.destroy() });
     try {
       const result = await replayWebSocket({
