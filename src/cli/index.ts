@@ -1,4 +1,4 @@
-#!/usr/bin/env node
+#!/usr/bin/env -S node --disable-warning=ExperimentalWarning
 import { Command } from 'commander';
 import { registerStart } from './commands/start.js';
 import { registerStop } from './commands/stop.js';
