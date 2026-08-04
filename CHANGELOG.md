@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.3.1](https://github.com/rvanbaalen/laurelproxy/compare/laurel-proxy-v0.3.0...laurel-proxy-v0.3.1) (2026-08-04)
+
+
+### Bug Fixes
+
+* **server:** destroy the upstream body when the relay loop is never reached ([81fa465](https://github.com/rvanbaalen/laurelproxy/commit/81fa465de47f1b26d3e9e6dfd7b5412cf45f1609))
+* **server:** re-check a joined h2 session before handing it to a caller ([67a78be](https://github.com/rvanbaalen/laurelproxy/commit/67a78bee8a2eb8c89eb4c5fb7de950987692db04))
+
 ## [0.3.0](https://github.com/rvanbaalen/laurelproxy/compare/laurel-proxy-v0.2.2...laurel-proxy-v0.3.0) (2026-08-03)
 
 
