@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.3.3](https://github.com/rvanbaalen/laurelproxy/compare/laurel-proxy-v0.3.2...laurel-proxy-v0.3.3) (2026-08-05)
+
+
+### Bug Fixes
+
+* **cli:** read --version from package.json instead of a hardcoded string ([#19](https://github.com/rvanbaalen/laurelproxy/issues/19)) ([edb5f12](https://github.com/rvanbaalen/laurelproxy/commit/edb5f1248ed27958cecb250e7c30f0f8812ceca6))
+
 ## [0.3.2](https://github.com/rvanbaalen/laurelproxy/compare/laurel-proxy-v0.3.1...laurel-proxy-v0.3.2) (2026-08-04)
 
 
