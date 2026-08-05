@@ -1,5 +1,6 @@
 #!/usr/bin/env -S node --disable-warning=ExperimentalWarning
 import { Command } from 'commander';
+import { readPackageVersion } from './version.js';
 import { registerStart } from './commands/start.js';
 import { registerStop } from './commands/stop.js';
 import { registerStatus } from './commands/status.js';
@@ -19,7 +20,7 @@ const program = new Command();
 program
   .name('laurel-proxy')
   .description('HTTP/HTTPS intercepting proxy with CLI and web UI')
-  .version('0.1.0');
+  .version(readPackageVersion());
 
 // Interactive mode (default when no command given)
 program
